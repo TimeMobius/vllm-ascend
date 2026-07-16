@@ -775,6 +775,25 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_rwkv7_alt_recurrent_meta(
+    const at::Tensor& r,
+    const at::Tensor& w,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& kk,
+    const at::Tensor& a,
+    const c10::optional<at::Tensor>& initial_state)
+{
+    const int64_t batch_size = r.size(0);
+    const int64_t seq_len = r.size(1);
+    const int64_t num_heads = r.size(2);
+    const int64_t head_dim = r.size(3);
+
+    auto out = at::empty_symint(r.sym_sizes(), r.options());
+    auto final_state = at::empty_symint(c10::SymDimVector{batch_size, num_heads, 64, 64}, r.options());
+    return {out, final_state};
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
     const at::Tensor& A_log,
     const at::Tensor& a,
@@ -1833,6 +1852,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
+    // rwkv7_alt_recurrent
+    ops.impl("npu_rwkv7_alt_recurrent", &vllm_ascend::meta::npu_rwkv7_alt_recurrent_meta);
 }
 }
 #endif

@@ -50,6 +50,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "attention/rwkv7_alt_recurrent/rwkv7_alt_recurrent_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
@@ -2847,5 +2848,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     float beta=1.0, "
         "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
     ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
+
+    ops.def(
+        "npu_rwkv7_alt_recurrent(Tensor r, "
+        "                         Tensor w, "
+        "                         Tensor k, "
+        "                         Tensor v, "
+        "                         Tensor kk, "
+        "                         Tensor a, "
+        "                         Tensor? initial_state=None) -> (Tensor out, Tensor final_state)");
+    ops.impl("npu_rwkv7_alt_recurrent", torch::kPrivateUse1, &vllm_ascend::npu_rwkv7_alt_recurrent);
 }
 #endif
