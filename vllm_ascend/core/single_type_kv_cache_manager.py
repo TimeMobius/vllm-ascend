@@ -41,6 +41,7 @@ class CompressAttentionManager(FullAttentionManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -56,8 +57,9 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
-            apply_admission_cap,
+            apply_admission_cap=apply_admission_cap,
         )
 
     def allocate_new_computed_blocks(
