@@ -14,7 +14,6 @@ not mocks or constant inspection.
 """
 
 import unittest
-from unittest import mock
 
 import torch
 
