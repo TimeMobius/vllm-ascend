@@ -265,12 +265,28 @@ def _apply_top_k_top_p_pytorch(
         return logits
 
 
+def _ascendc_op_available() -> bool:
+    """Check if the Ascend C custom op library is loaded at runtime."""
+    try:
+        return hasattr(torch.ops._C_ascend, "npu_apply_top_k_top_p")
+    except Exception:
+        return False
+
+
 def _apply_top_k_top_p_ascendc(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
     top_k: int | None = None,
 ) -> torch.Tensor:
+    if not _ascendc_op_available():
+        logger.warning_once(
+            "[sample/sampler] Ascend C custom op npu_apply_top_k_top_p not found. "
+            "Falling back to PyTorch implementation. For best performance, install the "
+            "compiled vllm-ascend with `pip install -e .`"
+        )
+        return _apply_top_k_top_p_pytorch(logits, k, p, top_k)
+
     if get_ascend_config().enable_reduce_sample:
         tp_group = get_tp_group()
         B, V_local = logits.shape
