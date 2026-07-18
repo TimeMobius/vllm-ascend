@@ -27,7 +27,7 @@ std::tuple<at::Tensor, at::Tensor> npu_rwkv7_alt_recurrent(
     const at::Tensor& a,
     const c10::optional<at::Tensor>& initial_state)
 {
-    TORCH_CHECK(r.is_npu(), "`r` must be a NPU tensor.");
+    TORCH_CHECK(r.device().type() == c10::DeviceType::PrivateUse1, "`r` must be a NPU tensor.");
     TORCH_CHECK(r.scalar_type() == at::ScalarType::Float, "`r` must have dtype float32.");
     TORCH_CHECK(r.is_contiguous(), "`r` must be contiguous.");
     TORCH_CHECK(r.dim() == 4, "`r` must be 4D, got ", r.dim(), ".");
@@ -58,7 +58,7 @@ std::tuple<at::Tensor, at::Tensor> npu_rwkv7_alt_recurrent(
 
     if (initial_state.has_value()) {
         const at::Tensor& h0 = *initial_state;
-        TORCH_CHECK(h0.is_npu(), "`initial_state` must be a NPU tensor.");
+        TORCH_CHECK(h0.device().type() == c10::DeviceType::PrivateUse1, "`initial_state` must be a NPU tensor.");
         TORCH_CHECK(h0.scalar_type() == at::ScalarType::Float,
                     "`initial_state` must have dtype float32.");
         TORCH_CHECK(h0.is_contiguous(), "`initial_state` must be contiguous.");

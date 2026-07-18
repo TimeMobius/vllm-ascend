@@ -4174,6 +4174,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
+                    or isinstance(layer_kv_cache_spec[layer_name], MambaSpec)
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
