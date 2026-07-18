@@ -294,11 +294,9 @@ def _patch_rwkv7_recurrent_scan_varlen():
                 r, w, k, v, kk, a, query_start_loc, initial_state
             )
 
-        # Check that batch size is 1 (required by cu_seqlens interface)
-        if r.shape[0] != 1:
-            return original_recurrent_scan_varlen(
-                r, w, k, v, kk, a, query_start_loc, initial_state
-            )
+        # fused kernel expects cu_seqlens and B=1 in 4D; unsqueeze(0) gives [1, T, H, K]
+        # where B=1 satisfies the cu_seqlens constraint. The 3D r.shape[0] is total_tokens,
+        # not batch size, so it can be > 1 for multi-token varlen.
 
         # fused kernel expects cu_seqlens as tensor
         # query_start_loc is already the cumulative sequence lengths

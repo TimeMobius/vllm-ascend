@@ -14,6 +14,7 @@ not mocks or constant inspection.
 """
 
 import unittest
+from unittest import mock
 
 import torch
 
@@ -262,6 +263,60 @@ class TestRWKV7VarlenScanDispatch(unittest.TestCase):
         torch.testing.assert_close(
             fused_state, ref_state, atol=1e-4, rtol=1e-4, msg="Varlen final state mismatch"
         )
+
+    def test_varlen_fused_path_selected_via_mock(self):
+        """
+        Prove fused_recurrent_rwkv7 is called for multi-token varlen
+        (total_tokens=7, two sequences of unequal length).
+
+        Uses mock to observe the actual kernel call without relying on
+        constant inspection or output comparison alone.
+        """
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+
+        H, K, V = 2, 8, 16
+        seq1_len, seq2_len = 4, 3
+        total_tokens = seq1_len + seq2_len
+        cu_seqlens = torch.tensor([0, seq1_len, total_tokens], device="npu", dtype=torch.long)
+
+        r = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        w = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        k = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        v = torch.randn(total_tokens, H, V, device="npu", dtype=torch.float32)
+        kk = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        a = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        initial_state = torch.randn(2, H, K, V, device="npu", dtype=torch.float32)
+
+        ops_cache = patch_rwkv7._ascend_ops
+        if ops_cache is not None and ops_cache.fused_recurrent_rwkv7 is not None:
+            original_fused = ops_cache.fused_recurrent_rwkv7
+            call_tracker = {"called": False}
+
+            def tracking_fused(*args, **kwargs):
+                call_tracker["called"] = True
+                return original_fused(*args, **kwargs)
+
+            ops_cache.fused_recurrent_rwkv7 = tracking_fused
+            try:
+                output, final_state = rwkv7_module._rwkv7_recurrent_scan_varlen(
+                    r, w, k, v, kk, a, cu_seqlens, initial_state=initial_state
+                )
+                self.assertTrue(
+                    call_tracker["called"],
+                    "fused_recurrent_rwkv7 was NOT called for multi-token varlen; "
+                    "guard may still be blocking dispatch"
+                )
+                self.assertEqual(output.device.type, "npu")
+                self.assertTrue(torch.isfinite(output).all())
+                self.assertEqual(final_state.shape, (2, H, K, V))
+            finally:
+                ops_cache.fused_recurrent_rwkv7 = original_fused
+        else:
+            self.skipTest("fused_recurrent_rwkv7 not available in this environment")
 
 
 class TestRWKV7EpilogueDispatch(unittest.TestCase):
