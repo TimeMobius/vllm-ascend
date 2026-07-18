@@ -25,20 +25,17 @@ class TestRWKV7PatchIdempotency(unittest.TestCase):
         """Verify apply_patch() is idempotent - no error on repeated calls."""
         from vllm_ascend.patch.worker import patch_rwkv7
 
-        # Apply patch multiple times - should not raise
         patch_rwkv7.apply_patch()
         patch_rwkv7.apply_patch()
-        patch_rwkv7.apply_patch()  # Multiple times is OK
+        patch_rwkv7.apply_patch()
 
     def test_patch_marks_module(self):
         """Verify patch sets _RWKV7_ASCEND_PATCHED flag."""
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
 
-        # Apply patch
         patch_rwkv7.apply_patch()
 
-        # Check flag on upstream module
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
         self.assertTrue(getattr(rwkv7_module, "_RWKV7_ASCEND_PATCHED", False))
 
@@ -56,12 +53,9 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
 
-        # Apply patch
         patch_rwkv7.apply_patch()
-
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
 
-        # Create valid NPU tensors
         T, H, K, V = 4, 2, 8, 16
         r = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         w = torch.randn(T, H, K, device="npu", dtype=torch.float32)
@@ -70,53 +64,62 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
         kk = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         a = torch.randn(T, H, K, device="npu", dtype=torch.float32)
 
-        # Call patched function
         output, final_state = rwkv7_module._rwkv7_recurrent_scan(
             r, w, k, v, kk, a, initial_state=None
         )
 
-        # Verify outputs are on NPU
         self.assertEqual(output.device.type, "npu")
         self.assertEqual(final_state.device.type, "npu")
-        # Verify finite output
         self.assertTrue(torch.isfinite(output).all())
         self.assertTrue(torch.isfinite(final_state).all())
 
     def test_numerical_parity_with_reference(self):
-        """Verify fused kernel output matches reference within tolerance."""
+        """
+        Verify fused kernel output matches reference within tolerance.
+
+        rwkv7_recurrent_reference expects 4D tensors [B, T, H, K], so we
+        unsqueeze 3D inputs to 4D, call reference, then squeeze outputs.
+        """
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
         from vllm_ascend.ops.triton.fla.fused_recurrent_rwkv7_ref import (
             rwkv7_recurrent_reference,
         )
 
-        # Apply patch
         patch_rwkv7.apply_patch()
-
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
 
-        # Create deterministic tensors
         torch.manual_seed(42)
         T, H, K, V = 4, 2, 8, 16
+
         r = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         w = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         k = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         v = torch.randn(T, H, V, device="npu", dtype=torch.float32)
         kk = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         a = torch.randn(T, H, K, device="npu", dtype=torch.float32)
-        initial_state = torch.randn(H, K, V, device="npu", dtype=torch.float32)
+        initial_state_3d = torch.randn(H, K, V, device="npu", dtype=torch.float32)
 
-        # Compute with patched (fused) function
         fused_output, fused_state = rwkv7_module._rwkv7_recurrent_scan(
-            r, w, k, v, kk, a, initial_state=initial_state
+            r, w, k, v, kk, a, initial_state=initial_state_3d
         )
 
-        # Compute with reference
-        ref_output, ref_state = rwkv7_recurrent_reference(
-            r, w, k, v, kk, a, initial_state=initial_state, output_final_state=True
+        r_4d = r.unsqueeze(0)
+        w_4d = w.unsqueeze(0)
+        k_4d = k.unsqueeze(0)
+        v_4d = v.unsqueeze(0)
+        kk_4d = kk.unsqueeze(0)
+        a_4d = a.unsqueeze(0)
+        initial_state_4d = initial_state_3d.unsqueeze(0)
+
+        ref_output_4d, ref_state_4d = rwkv7_recurrent_reference(
+            r_4d, w_4d, k_4d, v_4d, kk_4d, a_4d,
+            initial_state=initial_state_4d, output_final_state=True
         )
 
-        # Compare outputs
+        ref_output = ref_output_4d.squeeze(0)
+        ref_state = ref_state_4d.squeeze(0)
+
         torch.testing.assert_close(
             fused_output, ref_output, atol=1e-4, rtol=1e-4, msg="Output mismatch"
         )
@@ -132,12 +135,9 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
             rwkv7_recurrent_reference,
         )
 
-        # Apply patch
         patch_rwkv7.apply_patch()
-
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
 
-        # Create CPU tensors (will fallback)
         torch.manual_seed(42)
         T, H, K, V = 4, 2, 8, 16
         r = torch.randn(T, H, K, device="cpu", dtype=torch.float32)
@@ -147,23 +147,31 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
         kk = torch.randn(T, H, K, device="cpu", dtype=torch.float32)
         a = torch.randn(T, H, K, device="cpu", dtype=torch.float32)
 
-        # Call patched function - should fallback to reference on CPU
         output, final_state = rwkv7_module._rwkv7_recurrent_scan(
             r, w, k, v, kk, a, initial_state=None
         )
 
-        # Reference result
-        ref_output, ref_state = rwkv7_recurrent_reference(
-            r, w, k, v, kk, a, initial_state=None, output_final_state=True
+        r_4d = r.unsqueeze(0)
+        w_4d = w.unsqueeze(0)
+        k_4d = k.unsqueeze(0)
+        v_4d = v.unsqueeze(0)
+        kk_4d = kk.unsqueeze(0)
+        a_4d = a.unsqueeze(0)
+
+        ref_output_4d, ref_state_4d = rwkv7_recurrent_reference(
+            r_4d, w_4d, k_4d, v_4d, kk_4d, a_4d,
+            initial_state=None, output_final_state=True
         )
 
-        # Should match reference (since it fell back)
+        ref_output = ref_output_4d.squeeze(0)
+        ref_state = ref_state_4d.squeeze(0)
+
         torch.testing.assert_close(output, ref_output, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(final_state, ref_state, atol=1e-5, rtol=1e-5)
 
 
 class TestRWKV7VarlenScanDispatch(unittest.TestCase):
-    """Test _rwkv7_recurrent_scan_varlen dispatch."""
+    """Test _rwkv7_recurrent_scan_varlen dispatch with multi-sequence inputs."""
 
     @classmethod
     def setUpClass(cls):
@@ -175,12 +183,9 @@ class TestRWKV7VarlenScanDispatch(unittest.TestCase):
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
 
-        # Apply patch
         patch_rwkv7.apply_patch()
-
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
 
-        # Create valid NPU tensors with batch=1
         T, H, K, V = 8, 2, 8, 16
         r = torch.randn(1, T, H, K, device="npu", dtype=torch.float32).squeeze(0)
         w = torch.randn(1, T, H, K, device="npu", dtype=torch.float32).squeeze(0)
@@ -189,16 +194,74 @@ class TestRWKV7VarlenScanDispatch(unittest.TestCase):
         kk = torch.randn(1, T, H, K, device="npu", dtype=torch.float32).squeeze(0)
         a = torch.randn(1, T, H, K, device="npu", dtype=torch.float32).squeeze(0)
 
-        # cu_seqlens for 2 sequences of lengths 3 and 5
         cu_seqlens = torch.tensor([0, 3, 8], device="npu", dtype=torch.long)
 
         output, final_state = rwkv7_module._rwkv7_recurrent_scan_varlen(
             r, w, k, v, kk, a, cu_seqlens, initial_state=None
         )
 
-        # Verify outputs are on NPU
         self.assertEqual(output.device.type, "npu")
         self.assertTrue(torch.isfinite(output).all())
+
+    def test_varlen_numerical_parity_unequal_lengths(self):
+        """
+        Verify varlen recurrent scan with unequal sequence lengths produces
+        numerically correct output compared to reference.
+
+        Tests two sequences: seq1 has 4 tokens, seq2 has 3 tokens (total 7).
+        initial_state has shape [N=2, H, K, V].
+        """
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+        from vllm_ascend.ops.triton.fla.fused_recurrent_rwkv7_ref import (
+            rwkv7_recurrent_reference,
+        )
+
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+
+        torch.manual_seed(99)
+        H, K, V = 2, 8, 16
+
+        seq1_len, seq2_len = 4, 3
+        total_tokens = seq1_len + seq2_len
+        cu_seqlens = torch.tensor([0, seq1_len, total_tokens], device="npu", dtype=torch.long)
+
+        r = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        w = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        k = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        v = torch.randn(total_tokens, H, V, device="npu", dtype=torch.float32)
+        kk = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+        a = torch.randn(total_tokens, H, K, device="npu", dtype=torch.float32)
+
+        initial_state = torch.randn(2, H, K, V, device="npu", dtype=torch.float32)
+
+        fused_output, fused_state = rwkv7_module._rwkv7_recurrent_scan_varlen(
+            r, w, k, v, kk, a, cu_seqlens, initial_state=initial_state
+        )
+
+        r_4d = r.unsqueeze(0)
+        w_4d = w.unsqueeze(0)
+        k_4d = k.unsqueeze(0)
+        v_4d = v.unsqueeze(0)
+        kk_4d = kk.unsqueeze(0)
+        a_4d = a.unsqueeze(0)
+
+        ref_output_4d, ref_state_4d = rwkv7_recurrent_reference(
+            r_4d, w_4d, k_4d, v_4d, kk_4d, a_4d,
+            initial_state=initial_state, output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
+
+        ref_output = ref_output_4d.squeeze(0)
+        ref_state = ref_state_4d
+
+        torch.testing.assert_close(
+            fused_output, ref_output, atol=1e-4, rtol=1e-4, msg="Varlen output mismatch"
+        )
+        torch.testing.assert_close(
+            fused_state, ref_state, atol=1e-4, rtol=1e-4, msg="Varlen final state mismatch"
+        )
 
 
 class TestRWKV7EpilogueDispatch(unittest.TestCase):
@@ -213,17 +276,10 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
         """Verify epilogue uses kernel on NPU when conditions are met."""
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
-        from vllm_ascend.ops.triton.fla.rwkv7_epilogue import (
-            rwkv7_lnx_rkvres_xg_reference,
-        )
 
-        # Apply patch
         patch_rwkv7.apply_patch()
-
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
 
-        # Create minimal RWKV7Attention-like object for testing
-        # We need to test that the patched method produces valid output
         num_tokens, num_heads, head_dim, head_v_dim = 4, 2, 8, 16
         local_value_dim = num_heads * head_v_dim
 
@@ -235,7 +291,6 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
         v = torch.randn_like(recurrent_output)
         g = torch.randn(num_tokens, local_value_dim, device="npu", dtype=torch.float32)
 
-        # Create mock attention object with required attributes
         class MockAttention:
             def __init__(self):
                 self.tp_rank = 0
@@ -250,31 +305,97 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
                 self.g_norm.eps = 64e-5
 
             def o_proj(self, x):
-                # Mock projection - just return tensor
                 return x, None
 
         mock_attn = MockAttention()
-
-        # Get the patched method
         patched_method = rwkv7_module.RWKV7Attention._finalize_attention_output
 
-        # Call patched method
         output = patched_method(
             mock_attn, recurrent_output, r, k, v, g, torch.float32
         )
 
-        # Verify output is on NPU and finite
         self.assertEqual(output.device.type, "npu")
         self.assertTrue(torch.isfinite(output).all())
+
+    def test_epilogue_decode_path_t1_parity(self):
+        """
+        Verify epilogue with T=1 (decode single-token) matches reference.
+
+        This exercises the actual decode path where each token is processed
+        individually with recurrent state carrying across calls.
+        """
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+        from vllm_ascend.ops.triton.fla.rwkv7_epilogue import (
+            rwkv7_lnx_rkvres_xg_reference,
+        )
+
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+
+        num_heads, head_dim, head_v_dim = 2, 8, 16
+        local_value_dim = num_heads * head_v_dim
+
+        recurrent_output = torch.randn(
+            1, num_heads, head_v_dim, device="npu", dtype=torch.float32
+        )
+        r = torch.randn(1, num_heads, head_dim, device="npu", dtype=torch.float32)
+        k = torch.randn_like(r)
+        v = torch.randn_like(recurrent_output)
+        g = torch.randn(1, local_value_dim, device="npu", dtype=torch.float32)
+
+        r_k = torch.randn(num_heads, head_dim, device="npu", dtype=torch.float32)
+        weight = torch.ones(local_value_dim, device="npu", dtype=torch.float32)
+        bias = torch.zeros(local_value_dim, device="npu", dtype=torch.float32)
+        eps = 64e-5
+
+        class MockAttention:
+            def __init__(self):
+                self.tp_rank = 0
+                self.local_num_heads = num_heads
+                self.local_value_dim = local_value_dim
+                self.value_start = 0
+                self.value_end = local_value_dim
+                self.r_k = r_k
+                self.g_norm = type("gn", (), {})()
+                self.g_norm.weight = weight
+                self.g_norm.bias = bias
+                self.g_norm.eps = eps
+
+            def o_proj(self, x):
+                return x, None
+
+        mock_attn = MockAttention()
+        patched_method = rwkv7_module.RWKV7Attention._finalize_attention_output
+
+        fused_output = patched_method(
+            mock_attn, recurrent_output, r, k, v, g, torch.float32
+        )
+
+        ref_output = rwkv7_lnx_rkvres_xg_reference(
+            recurrent_output=recurrent_output,
+            r=r,
+            k=k,
+            v=v,
+            r_k=r_k,
+            weight=weight,
+            bias=bias,
+            g=g,
+            eps=eps,
+            output_dtype=torch.float32,
+        )
+        ref_output, _ = ref_output, None
+
+        torch.testing.assert_close(
+            fused_output, ref_output, atol=1e-4, rtol=1e-4, msg="Decode epilogue mismatch"
+        )
 
     def test_epilogue_fallback_on_cpu(self):
         """Verify epilogue falls back to reference on CPU."""
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
 
-        # Apply patch
         patch_rwkv7.apply_patch()
-
         rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
 
         num_tokens, num_heads, head_dim, head_v_dim = 4, 2, 8, 16
@@ -305,10 +426,8 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
                 return x, None
 
         mock_attn = MockAttention()
-
         patched_method = rwkv7_module.RWKV7Attention._finalize_attention_output
 
-        # Should work on CPU (fallback path)
         output = patched_method(
             mock_attn, recurrent_output, r, k, v, g, torch.float32
         )
@@ -322,24 +441,15 @@ class TestRWKV7PatchSafeWithoutTriton(unittest.TestCase):
 
     def test_patch_loads_without_triton_error(self):
         """Verify patch can be imported even without Triton."""
-        # This test ensures the patch doesn't hard-fail on import
-        # when Triton is unavailable
         try:
             from vllm_ascend.patch.worker import patch_rwkv7
-
-            # apply_patch should not raise
             patch_rwkv7.apply_patch()
         except Exception as e:
             self.fail(f"Patch should not raise on import: {e}")
 
 
 class TestRWKV7IntegrationObservableBehavior(unittest.TestCase):
-    """
-    Test observable behavior of the RWKV7 integration.
-
-    These tests verify actual behavior without mocking or inspecting
-    internal constants.
-    """
+    """Test observable behavior of the RWKV7 integration without mocking."""
 
     @classmethod
     def setUpClass(cls):
@@ -347,9 +457,7 @@ class TestRWKV7IntegrationObservableBehavior(unittest.TestCase):
             raise unittest.SkipTest("NPU not available, skipping integration tests")
 
     def test_end_to_end_recurrent_computation(self):
-        """
-        Verify end-to-end recurrent computation produces consistent results.
-        """
+        """Verify end-to-end recurrent computation produces consistent results."""
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
 
@@ -367,22 +475,15 @@ class TestRWKV7IntegrationObservableBehavior(unittest.TestCase):
         a = torch.randn(T, H, K, device="npu", dtype=torch.float32)
         initial_state = torch.randn(H, K, V, device="npu", dtype=torch.float32)
 
-        # Compute with patched function
         output, final_state = rwkv7_module._rwkv7_recurrent_scan(
             r, w, k, v, kk, a, initial_state=initial_state
         )
 
-        # Verify shapes
         self.assertEqual(output.shape, (T, H, V))
         self.assertEqual(final_state.shape, (H, K, V))
-
-        # Verify numerical properties
-        # - Output should be finite
         self.assertTrue(torch.isfinite(output).all())
-        # - Final state should be finite
         self.assertTrue(torch.isfinite(final_state).all())
-        # - Output at each timestep should not be all zeros
-        #   (recurrent computation produces meaningful output)
+
         for t in range(T):
             self.assertFalse(
                 torch.allclose(output[t], torch.zeros_like(output[t])),

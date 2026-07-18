@@ -36,8 +36,7 @@ The patch is idempotent and safe:
 from __future__ import annotations
 
 import importlib
-import math
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 
@@ -151,9 +150,13 @@ def _can_use_epilogue_kernel(
     # r: [num_tokens, num_heads, head_dim]
     # k: [num_tokens, num_heads, head_dim]
     # v: [num_tokens, num_heads, head_v_dim]
+    # r_k: [num_heads, head_dim]
     if recurrent_output.ndim != 3 or r.ndim != 3 or k.ndim != 3 or v.ndim != 3:
         return False
     if recurrent_output.shape[:2] != r.shape[:2]:
+        return False
+    # r_k must have same number of heads as recurrent_output
+    if r_k.shape[0] != recurrent_output.shape[1]:
         return False
     return True
 
