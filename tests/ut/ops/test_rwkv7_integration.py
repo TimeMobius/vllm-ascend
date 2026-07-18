@@ -9,8 +9,8 @@ These tests verify that the vllm-ascend patch correctly:
 3. Falls back to reference when conditions aren't met
 4. Produces numerically correct output
 
-Tests use observable behavior - actual tensor operations and their outputs,
-not mocks or constant inspection.
+Tests use observable tensor behavior, with call-tracking used in some
+dispatch-selection tests to verify the fused path is reached.
 """
 
 import unittest
@@ -438,8 +438,6 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
             eps=eps,
             output_dtype=torch.float32,
         )
-        ref_output, _ = ref_output, None
-
         torch.testing.assert_close(
             fused_output, ref_output, atol=1e-4, rtol=1e-4, msg="Decode epilogue mismatch"
         )
