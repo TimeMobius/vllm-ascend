@@ -11,12 +11,11 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor, prepare_inputs_to_capture
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, prepare_inputs_to_capture
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    DecodeSpeculatorCudaGraphManager,
-    PrefillSpeculatorCudaGraphManager,
+    SpeculatorCudaGraphManager,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -30,7 +29,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
+class PrefillEagleAclGraphManager(SpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
 
     def __init__(
@@ -62,14 +61,22 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
     def capture(
         self,
         forward_fn: Callable,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
+        model_state: ModelState,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             super().capture(
                 forward_fn,
-                attn_states,
+                model_state,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
                 progress_bar_desc=progress_bar_desc,
             )
 
@@ -119,7 +126,7 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         return ret
 
 
-class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
+class DecodeEagleAclGraphManager(SpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
 
     def __init__(
@@ -166,7 +173,7 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu") if self.dp_size > 1 else None
             )
-            attn_state = prepare_inputs_to_capture(
+            prepare_inputs_to_capture(
                 num_reqs,
                 num_tokens,
                 model_state,
@@ -181,13 +188,13 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
                 BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
                 num_tokens_across_dp,
             )
-            return fwd, attn_state
+            return fwd
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
-            # Skip DecodeSpeculatorCudaGraphManager.capture (which builds its own
+            # Skip SpeculatorCudaGraphManager.capture (which builds its own
             # create_forward_fn) and call CudaGraphManager.capture directly, so that
             # our Ascend-specific create_forward_fn above is the one that gets used
-            super(DecodeSpeculatorCudaGraphManager, self).capture(create_forward_fn, progress_bar_desc)
+            super(SpeculatorCudaGraphManager, self).capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

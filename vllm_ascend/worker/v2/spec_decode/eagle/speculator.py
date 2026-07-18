@@ -28,7 +28,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
@@ -36,6 +36,10 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import (
+    DecodeEagleAclGraphManager,
+    PrefillEagleAclGraphManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +79,26 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.input_batch: InputBatch | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        super().init_cudagraph_manager(cudagraph_mode)
-        # The Ascend graph managers are patched onto the upstream module and
-        # created by super().init_cudagraph_manager without a speculator ref.
-        # They need this speculator to update full-graph params, so set it here.
-        self.prefill_cudagraph_manager.speculator = self
-        self.decode_cudagraph_manager.speculator = self
+        self.prefill_cudagraph_manager = PrefillEagleAclGraphManager(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            self.num_speculative_steps + 1,
+            self,
+        )
+
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
+
+        self.decode_cudagraph_manager = DecodeEagleAclGraphManager(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            decode_query_len=1,
+            speculator=self,
+        )
 
     def propose(
         self,
@@ -165,7 +183,6 @@ class AscendEagleSpeculator(EagleSpeculator):
 
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
@@ -182,7 +199,11 @@ class AscendEagleSpeculator(EagleSpeculator):
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
-            attn_states,
+            self.model_state,
+            self.target_input_buffers,
+            self.block_tables,
+            self.target_attn_groups,
+            self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
 
