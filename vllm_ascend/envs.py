@@ -107,6 +107,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # RWKV7 dispatch instrumentation. When set to 1, records hits and fallbacks
+    # for recurrent_scan, mix6, kk_pre, and epilogue dispatches and emits a
+    # structured summary at process exit. When disabled (default), the
+    # instrumentation has minimal/no-op overhead and produces no log output.
+    # This is a diagnostic feature for kernel authors to establish actual
+    # hit/fallback behavior on real workloads; it does not change dispatch
+    # decisions or kernel math.
+    "VLLM_ASCEND_RWKV7_PROFILE": lambda: int(os.getenv("VLLM_ASCEND_RWKV7_PROFILE", "0")),
 }
 
 # end-env-vars-definition
