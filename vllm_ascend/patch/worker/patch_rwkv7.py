@@ -40,6 +40,12 @@ from typing import Optional
 
 import torch
 
+from vllm_ascend.profiler.rwkv7_counters import (
+    dispatch_fallback,
+    dispatch_hit,
+    DispatchKind,
+)
+
 # Lazy import to avoid hard dependency on Triton when not available
 _ascend_ops: Optional[object] = None
 
@@ -56,14 +62,24 @@ def _get_ascend_ops():
             from vllm_ascend.ops.triton.fla import (
                 rwkv7_lnx_rkvres_xg_reference,
             )
+            from vllm_ascend.ops.triton.fla import rwkv7_mix6
+            from vllm_ascend.ops.triton.fla import rwkv7_kk_pre
 
+            # Use staticmethod to prevent functions from becoming bound methods
+            # when accessed via instance. Without this, Python's descriptor
+            # protocol would inject an implicit self, causing TypeError like:
+            # "got multiple values for argument 'recurrent_output'"
             _ascend_ops = type(
                 "AscendOps",
                 (),
                 {
-                    "fused_recurrent_rwkv7": fused_recurrent_rwkv7,
-                    "rwkv7_lnx_rkvres_xg": rwkv7_lnx_rkvres_xg,
-                    "rwkv7_lnx_rkvres_xg_reference": rwkv7_lnx_rkvres_xg_reference,
+                    "fused_recurrent_rwkv7": staticmethod(fused_recurrent_rwkv7),
+                    "rwkv7_lnx_rkvres_xg": staticmethod(rwkv7_lnx_rkvres_xg),
+                    "rwkv7_lnx_rkvres_xg_reference": staticmethod(
+                        rwkv7_lnx_rkvres_xg_reference
+                    ),
+                    "rwkv7_mix6": staticmethod(rwkv7_mix6),
+                    "rwkv7_kk_pre": staticmethod(rwkv7_kk_pre),
                     "HAS_TRITON": True,
                 },
             )()
@@ -75,6 +91,8 @@ def _get_ascend_ops():
                     "fused_recurrent_rwkv7": None,
                     "rwkv7_lnx_rkvres_xg": None,
                     "rwkv7_lnx_rkvres_xg_reference": None,
+                    "rwkv7_mix6": None,
+                    "rwkv7_kk_pre": None,
                     "HAS_TRITON": False,
                 },
             )()
@@ -161,6 +179,75 @@ def _can_use_epilogue_kernel(
     return True
 
 
+def _can_use_mix6_kernel(
+    hidden_states: torch.Tensor,
+    delta: torch.Tensor,
+    x_r: torch.Tensor,
+    x_w: torch.Tensor,
+    x_k: torch.Tensor,
+    x_v: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+) -> bool:
+    """Check if rwkv7_mix6 can be used safely."""
+    ops = _get_ascend_ops()
+    if not ops.HAS_TRITON:
+        return False
+    if not _is_npu_available():
+        return False
+    # All inputs must be on NPU
+    if hidden_states.device.type != "npu":
+        return False
+    # Must be non-empty
+    if hidden_states.numel() == 0:
+        return False
+    # All must be contiguous
+    if not all(
+        t.is_contiguous()
+        for t in [hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g]
+    ):
+        return False
+    # hidden_states and delta must have same shape
+    if hidden_states.shape != delta.shape:
+        return False
+    return True
+
+
+def _can_use_kk_pre_kernel(
+    k: torch.Tensor,
+    k_k: torch.Tensor,
+    a: torch.Tensor,
+    k_a: torch.Tensor,
+) -> bool:
+    """Check if rwkv7_kk_pre can be used safely."""
+    ops = _get_ascend_ops()
+    if not ops.HAS_TRITON:
+        return False
+    if not _is_npu_available():
+        return False
+    # All inputs must be on NPU
+    if k.device.type != "npu":
+        return False
+    # Must be non-empty and contiguous
+    if k.numel() == 0:
+        return False
+    if not all(t.is_contiguous() for t in [k, k_k, a, k_a]):
+        return False
+    # k and a must be 3D [T, H, K], k_k and k_a must be 2D [H, K]
+    if k.ndim != 3 or a.ndim != 3:
+        return False
+    if k_k.ndim != 2 or k_a.ndim != 2:
+        return False
+    # Shape constraints: k_k and k_a must match head layout of k
+    if k.shape[1:] != k_k.shape:
+        return False
+    if k.shape != a.shape:
+        return False
+    if k_k.shape != k_a.shape:
+        return False
+    return True
+
+
 def _patch_rwkv7_recurrent_scan():
     """
     Patch _rwkv7_recurrent_scan to use fused_recurrent_rwkv7 when safe.
@@ -201,6 +288,7 @@ def _patch_rwkv7_recurrent_scan():
         falls back to the exact upstream reference implementation.
         """
         if not _can_use_fused_recurrent(r, w, k, v, kk, a):
+            dispatch_fallback(DispatchKind.RECURRENT_SCAN, "guard_false")
             return original_recurrent_scan(r, w, k, v, kk, a, initial_state)
 
         # Compute output using fused kernel
@@ -239,13 +327,13 @@ def _patch_rwkv7_recurrent_scan():
             )
             # o: [1, T, H, V]
             # ht: [1, H, K, V] or None
-
+            dispatch_hit(DispatchKind.RECURRENT_SCAN)
             output = o.squeeze(0)  # [T, H, V]
             final_state = ht.squeeze(0) if ht is not None else None
 
             return output, final_state
         except Exception:
-            # Kernel failed for some reason, fall back to reference
+            dispatch_fallback(DispatchKind.RECURRENT_SCAN, "kernel_exception")
             return original_recurrent_scan(r, w, k, v, kk, a, initial_state)
 
     # Install the patched function
@@ -290,6 +378,7 @@ def _patch_rwkv7_recurrent_scan_varlen():
         Falls back to reference when conditions aren't met.
         """
         if not _can_use_fused_recurrent(r, w, k, v, kk, a):
+            dispatch_fallback(DispatchKind.RECURRENT_SCAN_VARLEN, "guard_false")
             return original_recurrent_scan_varlen(
                 r, w, k, v, kk, a, query_start_loc, initial_state
             )
@@ -330,13 +419,14 @@ def _patch_rwkv7_recurrent_scan_varlen():
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
             )
-
+            dispatch_hit(DispatchKind.RECURRENT_SCAN_VARLEN)
             output = o.squeeze(0)  # [T, H, V]
             # ht: [N, H, K, V]
             final_state = ht
 
             return output, final_state
         except Exception:
+            dispatch_fallback(DispatchKind.RECURRENT_SCAN_VARLEN, "kernel_exception")
             return original_recurrent_scan_varlen(
                 r, w, k, v, kk, a, query_start_loc, initial_state
             )
@@ -417,6 +507,7 @@ def _patch_finalize_attention_output():
             bias=local_bias,
             g=g,
         ):
+            dispatch_fallback(DispatchKind.EPILOGUE, "guard_false")
             return original_finalize(
                 self, recurrent_output, r, k, v, g, hidden_dtype
             )
@@ -433,16 +524,158 @@ def _patch_finalize_attention_output():
                 g=g,
                 eps=self.g_norm.eps,
             )
+            dispatch_hit(DispatchKind.EPILOGUE)
             output = output.to(hidden_dtype)
             output, _ = self.o_proj(output)
             return output
         except Exception:
+            dispatch_fallback(DispatchKind.EPILOGUE, "kernel_exception")
             return original_finalize(
                 self, recurrent_output, r, k, v, g, hidden_dtype
             )
 
     RWKV7Attention._finalize_attention_output = _finalize_attention_output_ascend
     RWKV7Attention._ASCEND_EPILOGUE_PATCHED = True
+
+
+def _patch_recurrent_inputs():
+    """
+    Patch RWKV7Attention._project_recurrent_inputs to use mix6 and kk_pre kernels when safe.
+
+    The projection path performs:
+    1. Mixing: xr = hidden_states + delta * x_r (6 mixed states)
+    2. Linear projections: r, w, k, v via r_proj, k_proj, v_proj
+    3. LoRA projections: w via w_lora, a via a_lora, g via g_lora
+    4. v_first handling for layer_idx != 0
+    5. Reshapes to [T, H, K] and [T, H, V]
+    6. kk = normalize(k * k_k) and k = k * (1 + (a-1) * k_a)
+
+    mix6 fuses the 6 mixing operations.
+    kk_pre fuses the kk normalization and k adjustment.
+    """
+    ops = _get_ascend_ops()
+
+    try:
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        RWKV7Attention = rwkv7_module.RWKV7Attention
+    except ImportError:
+        return
+
+    if getattr(RWKV7Attention, "_ASCEND_PROJECTION_PATCHED", False):
+        return
+
+    original_project = RWKV7Attention._project_recurrent_inputs
+
+    # LOG_DECAY_SCALE constant from upstream
+    LOG_DECAY_SCALE = rwkv7_module.LOG_DECAY_SCALE
+
+    def _project_recurrent_inputs_ascend(
+        self,
+        hidden_states: torch.Tensor,
+        delta: torch.Tensor,
+        v_first: torch.Tensor | None,
+    ):
+        x_r = self.x_r.squeeze(0).squeeze(0)
+        x_w = self.x_w.squeeze(0).squeeze(0)
+        x_k = self.x_k.squeeze(0).squeeze(0)
+        x_v = self.x_v.squeeze(0).squeeze(0)
+        x_a = self.x_a.squeeze(0).squeeze(0)
+        x_g = self.x_g.squeeze(0).squeeze(0)
+
+        # Try mix6 kernel first for the 6 mixing operations
+        mix6_guard_passed = False
+        if _can_use_mix6_kernel(
+            hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g
+        ):
+            mix6_guard_passed = True
+            try:
+                xr, xw, xk, xv, xa, xg = ops.rwkv7_mix6(
+                    hidden_states=hidden_states,
+                    delta=delta,
+                    x_r=x_r,
+                    x_w=x_w,
+                    x_k=x_k,
+                    x_v=x_v,
+                    x_a=x_a,
+                    x_g=x_g,
+                )
+                mix6_used = True
+                dispatch_hit(DispatchKind.MIX6)
+            except Exception:
+                dispatch_fallback(DispatchKind.MIX6, "kernel_exception")
+                mix6_used = False
+
+        if not mix6_used:
+            xr = hidden_states.addcmul(delta, x_r)
+            xw = hidden_states.addcmul(delta, x_w)
+            xk = hidden_states.addcmul(delta, x_k)
+            xv = hidden_states.addcmul(delta, x_v)
+            xa = hidden_states.addcmul(delta, x_a)
+            xg = hidden_states.addcmul(delta, x_g)
+            if not mix6_guard_passed:
+                dispatch_fallback(DispatchKind.MIX6, "guard_false")
+
+        r, _ = self.r_proj(xr)
+        w = LOG_DECAY_SCALE * self.w_lora(xw).sigmoid()
+        k, _ = self.k_proj(xk)
+        v, _ = self.v_proj(xv)
+
+        if self.layer_idx == 0:
+            v_first_out = v
+        else:
+            if v_first is None:
+                raise ValueError("RWKV7 layers after layer 0 require `v_first`.")
+            v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
+            v_first_out = v_first
+
+        a = self.a_lora(xa).sigmoid()
+        g = self.g_lora(xg)
+
+        r = r.view(-1, self.local_num_heads, self.head_dim).to(torch.float32)
+        w = w.view(-1, self.local_num_heads, self.head_dim).to(torch.float32)
+        k = k.view(-1, self.local_num_heads, self.head_dim).to(torch.float32)
+        a = a.view(-1, self.local_num_heads, self.head_dim).to(torch.float32)
+        v = v.view(-1, self.local_num_heads, self.head_v_dim).to(torch.float32)
+
+        local_k_k = self.k_k[self.key_start : self.key_end].view(
+            1, self.local_num_heads, self.head_dim
+        )
+        local_k_a = self.k_a[self.key_start : self.key_end].view(
+            1, self.local_num_heads, self.head_dim
+        )
+
+        # Try kk_pre kernel for fused kk normalization and k adjustment
+        # kk_pre expects k_k and k_a as [H, K], but local_k_k/a are [1, H, K]
+        local_k_k_2d = local_k_k.squeeze(0)  # [H, K]
+        local_k_a_2d = local_k_a.squeeze(0)  # [H, K]
+
+        if _can_use_kk_pre_kernel(k, local_k_k_2d, a, local_k_a_2d):
+            try:
+                k_adj, kk = ops.rwkv7_kk_pre(
+                    k=k,
+                    k_k=local_k_k_2d,
+                    a=a,
+                    k_a=local_k_a_2d,
+                )
+                dispatch_hit(DispatchKind.KK_PRE)
+                k = k_adj
+            except Exception:
+                dispatch_fallback(DispatchKind.KK_PRE, "kernel_exception")
+                kk = torch.nn.functional.normalize(
+                    k * local_k_k.to(torch.float32), dim=-1, p=2.0
+                )
+                k = k * (1 + (a - 1) * local_k_a.to(torch.float32))
+        else:
+            dispatch_fallback(DispatchKind.KK_PRE, "guard_false")
+            kk = torch.nn.functional.normalize(
+                k * local_k_k.to(torch.float32), dim=-1, p=2.0
+            )
+            k = k * (1 + (a - 1) * local_k_a.to(torch.float32))
+
+        return r, w, k, v, kk, a, g, v_first_out
+
+    RWKV7Attention._project_recurrent_inputs = _project_recurrent_inputs_ascend
+    RWKV7Attention._ASCEND_PROJECTION_PATCHED = True
 
 
 def apply_patch():
@@ -465,6 +698,7 @@ def apply_patch():
     _patch_rwkv7_recurrent_scan()
     _patch_rwkv7_recurrent_scan_varlen()
     _patch_finalize_attention_output()
+    _patch_recurrent_inputs()
 
 
 # Apply the patch when this module is imported

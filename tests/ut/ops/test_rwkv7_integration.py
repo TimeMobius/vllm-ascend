@@ -16,6 +16,32 @@ dispatch-selection tests to verify the fused path is reached.
 import unittest
 
 import torch
+import torch.nn.functional as F
+
+
+def _make_gnorm_mock(weight, bias, eps):
+    """
+    Create a g_norm mock that matches the callable contract expected by
+    upstream RWKV7Attention._finalize_attention_output (which calls
+    self.g_norm(output)).
+
+    The mock must:
+    - Be callable: g_norm(tensor) -> tensor (applies group norm)
+    - Have .weight attribute
+    - Have .bias attribute
+    - Have .eps attribute
+    """
+
+    class MockGroupNorm:
+        def __init__(self, weight, bias, eps):
+            self.weight = weight
+            self.bias = bias
+            self.eps = eps
+
+        def __call__(self, x):
+            return F.group_norm(x, self.weight.shape[0], self.weight, self.bias, self.eps)
+
+    return MockGroupNorm(weight, bias, eps)
 
 
 class TestRWKV7PatchIdempotency(unittest.TestCase):
@@ -353,10 +379,11 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
                 self.value_start = 0
                 self.value_end = local_value_dim
                 self.r_k = torch.randn(num_heads, head_dim, device="npu", dtype=torch.float32)
-                self.g_norm = type("gn", (), {})()
-                self.g_norm.weight = torch.ones(local_value_dim, device="npu", dtype=torch.float32)
-                self.g_norm.bias = torch.zeros(local_value_dim, device="npu", dtype=torch.float32)
-                self.g_norm.eps = 64e-5
+                self.g_norm = _make_gnorm_mock(
+                    weight=torch.ones(local_value_dim, device="npu", dtype=torch.float32),
+                    bias=torch.zeros(local_value_dim, device="npu", dtype=torch.float32),
+                    eps=64e-5,
+                )
 
             def o_proj(self, x):
                 return x, None
@@ -411,10 +438,7 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
                 self.value_start = 0
                 self.value_end = local_value_dim
                 self.r_k = r_k
-                self.g_norm = type("gn", (), {})()
-                self.g_norm.weight = weight
-                self.g_norm.bias = bias
-                self.g_norm.eps = eps
+                self.g_norm = _make_gnorm_mock(weight=weight, bias=bias, eps=eps)
 
             def o_proj(self, x):
                 return x, None
@@ -469,10 +493,11 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
                 self.value_start = 0
                 self.value_end = local_value_dim
                 self.r_k = torch.randn(num_heads, head_dim, device="cpu", dtype=torch.float32)
-                self.g_norm = type("gn", (), {})()
-                self.g_norm.weight = torch.ones(local_value_dim, device="cpu", dtype=torch.float32)
-                self.g_norm.bias = torch.zeros(local_value_dim, device="cpu", dtype=torch.float32)
-                self.g_norm.eps = 64e-5
+                self.g_norm = _make_gnorm_mock(
+                    weight=torch.ones(local_value_dim, device="cpu", dtype=torch.float32),
+                    bias=torch.zeros(local_value_dim, device="cpu", dtype=torch.float32),
+                    eps=64e-5,
+                )
 
             def o_proj(self, x):
                 return x, None
@@ -541,6 +566,176 @@ class TestRWKV7IntegrationObservableBehavior(unittest.TestCase):
                 torch.allclose(output[t], torch.zeros_like(output[t])),
                 f"Output at timestep {t} should not be all zeros"
             )
+
+
+class TestRWKV7ProjectionIntegration(unittest.TestCase):
+    """Test _project_recurrent_inputs integration with mix6 and kk_pre kernels."""
+
+    def _make_mock_attention(self, layer_idx, hidden_size, num_heads, head_dim,
+                             head_v_dim, tp_rank=0, tp_size=1, device="cpu"):
+        """Create a mock RWKV7Attention for testing _project_recurrent_inputs."""
+        local_num_heads = num_heads // tp_size
+        local_key_dim = hidden_size // tp_size
+        local_value_dim = num_heads * head_v_dim // tp_size
+        key_start = tp_rank * local_key_dim
+        key_end = key_start + local_key_dim
+        value_start = tp_rank * local_value_dim
+        value_end = value_start + local_value_dim
+
+        class MockLoRA:
+            def __init__(self, dim):
+                self.weight = torch.randn(dim, dim, device=device, dtype=torch.float32)
+
+            def __call__(self, x):
+                return torch.nn.functional.linear(x, self.weight)
+
+        class MockLinear:
+            def __init__(self, in_dim, out_dim):
+                self.weight = torch.randn(out_dim, in_dim, device=device, dtype=torch.float32)
+
+            def __call__(self, x):
+                return torch.nn.functional.linear(x, self.weight), None
+
+        class MockAttention:
+            def __init__(self):
+                self.layer_idx = layer_idx
+                self.hidden_size = hidden_size
+                self.num_heads = num_heads
+                self.head_dim = head_dim
+                self.head_v_dim = head_v_dim
+                self.tp_rank = tp_rank
+                self.tp_size = tp_size
+                self.local_num_heads = local_num_heads
+                self.local_key_dim = local_key_dim
+                self.local_value_dim = local_value_dim
+                self.key_start = key_start
+                self.key_end = key_end
+                self.value_start = value_start
+                self.value_end = value_end
+
+                self.x_r = torch.randn(1, 1, hidden_size, device=device, dtype=torch.float32)
+                self.x_w = torch.randn(1, 1, hidden_size, device=device, dtype=torch.float32)
+                self.x_k = torch.randn(1, 1, hidden_size, device=device, dtype=torch.float32)
+                self.x_v = torch.randn(1, 1, hidden_size, device=device, dtype=torch.float32)
+                self.x_a = torch.randn(1, 1, hidden_size, device=device, dtype=torch.float32)
+                self.x_g = torch.randn(1, 1, hidden_size, device=device, dtype=torch.float32)
+
+                self.k_k = torch.randn(hidden_size, device=device, dtype=torch.float32)
+                self.k_a = torch.randn(hidden_size, device=device, dtype=torch.float32)
+
+                self.r_proj = MockLinear(hidden_size, hidden_size)
+                self.k_proj = MockLinear(hidden_size, hidden_size)
+                self.v_proj = MockLinear(hidden_size, local_value_dim)
+                self.w_lora = MockLoRA(hidden_size)
+                self.a_lora = MockLoRA(hidden_size)
+                self.g_lora = MockLoRA(hidden_size)
+                if layer_idx != 0:
+                    self.v_lora = MockLoRA(hidden_size)
+
+        return MockAttention()
+
+    @classmethod
+    def setUpClass(cls):
+        if not torch.npu.is_available():
+            raise unittest.SkipTest("NPU not available, skipping projection tests")
+
+    def test_projection_patch_idempotent(self):
+        """Verify _project_recurrent_inputs patch is idempotent."""
+        from vllm_ascend.patch.worker import patch_rwkv7
+        patch_rwkv7.apply_patch()
+        patch_rwkv7.apply_patch()
+
+    def test_projection_patch_marks_class(self):
+        """Verify patch sets _ASCEND_PROJECTION_PATCHED flag."""
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        self.assertTrue(
+            getattr(rwkv7_module.RWKV7Attention, "_ASCEND_PROJECTION_PATCHED", False)
+        )
+
+    def test_projection_npu_dispatch(self):
+        """Verify projection uses kernels on NPU when conditions are met."""
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+
+        T, H, K, V = 4, 2, 8, 16
+        hidden_size = H * K
+        mock_attn = self._make_mock_attention(
+            layer_idx=0, hidden_size=hidden_size, num_heads=H, head_dim=K,
+            head_v_dim=V, device="npu", tp_rank=0, tp_size=1
+        )
+        patched_method = rwkv7_module.RWKV7Attention._project_recurrent_inputs
+
+        hidden_states = torch.randn(T, hidden_size, device="npu", dtype=torch.float32)
+        delta = torch.randn(T, hidden_size, device="npu", dtype=torch.float32)
+
+        r, w, k, v, kk, a, g, v_first_out = patched_method(
+            mock_attn, hidden_states, delta, None
+        )
+
+        self.assertEqual(r.device.type, "npu")
+        self.assertEqual(w.device.type, "npu")
+        self.assertEqual(k.device.type, "npu")
+        self.assertEqual(v.device.type, "npu")
+        self.assertTrue(torch.isfinite(r).all())
+        self.assertTrue(torch.isfinite(w).all())
+        self.assertTrue(torch.isfinite(k).all())
+        self.assertTrue(torch.isfinite(v).all())
+
+    def test_projection_cpu_fallback(self):
+        """Verify projection falls back to reference on CPU."""
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+
+        T, H, K, V = 4, 2, 8, 16
+        hidden_size = H * K
+        mock_attn = self._make_mock_attention(
+            layer_idx=0, hidden_size=hidden_size, num_heads=H, head_dim=K,
+            head_v_dim=V, device="cpu", tp_rank=0, tp_size=1
+        )
+        patched_method = rwkv7_module.RWKV7Attention._project_recurrent_inputs
+
+        hidden_states = torch.randn(T, hidden_size, device="cpu", dtype=torch.float32)
+        delta = torch.randn(T, hidden_size, device="cpu", dtype=torch.float32)
+
+        r, w, k, v, kk, a, g, v_first_out = patched_method(
+            mock_attn, hidden_states, delta, None
+        )
+
+        self.assertEqual(r.device.type, "cpu")
+        self.assertTrue(torch.isfinite(r).all())
+
+    def test_projection_v_first_layer_nonzero(self):
+        """Verify projection with v_first (layer_idx != 0) works."""
+        import importlib
+        from vllm_ascend.patch.worker import patch_rwkv7
+        patch_rwkv7.apply_patch()
+        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+
+        T, H, K, V = 4, 2, 8, 16
+        hidden_size = H * K
+        mock_attn = self._make_mock_attention(
+            layer_idx=1, hidden_size=hidden_size, num_heads=H, head_dim=K,
+            head_v_dim=V, device="npu", tp_rank=0, tp_size=1
+        )
+        patched_method = rwkv7_module.RWKV7Attention._project_recurrent_inputs
+
+        hidden_states = torch.randn(T, hidden_size, device="npu", dtype=torch.float32)
+        delta = torch.randn(T, hidden_size, device="npu", dtype=torch.float32)
+        v_first = torch.randn(T, H * V, device="npu", dtype=torch.float32)
+
+        r, w, k, v, kk, a, g, v_first_out = patched_method(
+            mock_attn, hidden_states, delta, v_first
+        )
+
+        self.assertEqual(v_first_out.shape, v_first.shape)
+        self.assertTrue(torch.isfinite(v_first_out).all())
 
 
 if __name__ == "__main__":
