@@ -62,7 +62,7 @@ class TestRWKV7PatchIdempotency(unittest.TestCase):
 
         patch_rwkv7.apply_patch()
 
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
         self.assertTrue(getattr(rwkv7_module, "_RWKV7_ASCEND_PATCHED", False))
 
 
@@ -80,7 +80,7 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
         from vllm_ascend.patch.worker import patch_rwkv7
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         T, H, K, V = 4, 2, 8, 16
         r = torch.randn(T, H, K, device="npu", dtype=torch.float32)
@@ -113,7 +113,7 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
         )
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         torch.manual_seed(42)
         T, H, K, V = 4, 2, 8, 16
@@ -162,7 +162,7 @@ class TestRWKV7RecurrentScanDispatch(unittest.TestCase):
         )
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         torch.manual_seed(42)
         T, H, K, V = 4, 2, 8, 16
@@ -210,7 +210,7 @@ class TestRWKV7VarlenScanDispatch(unittest.TestCase):
         from vllm_ascend.patch.worker import patch_rwkv7
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         T, H, K, V = 8, 2, 8, 16
         r = torch.randn(1, T, H, K, device="npu", dtype=torch.float32).squeeze(0)
@@ -244,7 +244,7 @@ class TestRWKV7VarlenScanDispatch(unittest.TestCase):
         )
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         torch.manual_seed(99)
         H, K, V = 2, 8, 16
@@ -301,7 +301,7 @@ class TestRWKV7VarlenScanDispatch(unittest.TestCase):
         from vllm_ascend.patch.worker import patch_rwkv7
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         H, K, V = 2, 8, 16
         seq1_len, seq2_len = 4, 3
@@ -358,7 +358,7 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
         from vllm_ascend.patch.worker import patch_rwkv7
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         num_tokens, num_heads, head_dim, head_v_dim = 4, 2, 8, 16
         local_value_dim = num_heads * head_v_dim
@@ -412,7 +412,7 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
         )
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         num_heads, head_dim, head_v_dim = 2, 8, 16
         local_value_dim = num_heads * head_v_dim
@@ -472,7 +472,7 @@ class TestRWKV7EpilogueDispatch(unittest.TestCase):
         from vllm_ascend.patch.worker import patch_rwkv7
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         num_tokens, num_heads, head_dim, head_v_dim = 4, 2, 8, 16
         local_value_dim = num_heads * head_v_dim
@@ -539,7 +539,7 @@ class TestRWKV7IntegrationObservableBehavior(unittest.TestCase):
         from vllm_ascend.patch.worker import patch_rwkv7
 
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         torch.manual_seed(123)
         T, H, K, V = 6, 2, 8, 16
@@ -650,7 +650,7 @@ class TestRWKV7ProjectionIntegration(unittest.TestCase):
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
         self.assertTrue(
             getattr(rwkv7_module.RWKV7Attention, "_ASCEND_PROJECTION_PATCHED", False)
         )
@@ -660,7 +660,7 @@ class TestRWKV7ProjectionIntegration(unittest.TestCase):
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         T, H, K, V = 4, 2, 8, 16
         hidden_size = H * K
@@ -691,7 +691,7 @@ class TestRWKV7ProjectionIntegration(unittest.TestCase):
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         T, H, K, V = 4, 2, 8, 16
         hidden_size = H * K
@@ -716,7 +716,7 @@ class TestRWKV7ProjectionIntegration(unittest.TestCase):
         import importlib
         from vllm_ascend.patch.worker import patch_rwkv7
         patch_rwkv7.apply_patch()
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
 
         T, H, K, V = 4, 2, 8, 16
         hidden_size = H * K

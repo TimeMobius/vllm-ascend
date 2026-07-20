@@ -121,7 +121,7 @@ class TestRWKV7EpilogueCPUFallback(unittest.TestCase):
     def test_reference_cpu_with_upstream_parity(self):
         """Test reference matches upstream implementation."""
         try:
-            from vllm.model_executor.layers.fla.ops.rwkv7 import (
+            from vllm_ascend.ops.triton.fla.rwkv7 import (
                 rwkv7_lnx_rkvres_xg_reference as upstream_ref,
             )
         except ImportError:

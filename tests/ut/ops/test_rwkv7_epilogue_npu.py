@@ -264,7 +264,7 @@ class TestRWKV7EpilogueNPUParity(unittest.TestCase):
 
     def test_parity_with_upstream_reference(self):
         """Test parity against the actual upstream reference implementation."""
-        from vllm.model_executor.layers.fla.ops.rwkv7 import rwkv7_lnx_rkvres_xg_reference as upstream_ref
+        from vllm_ascend.ops.triton.fla.rwkv7 import rwkv7_lnx_rkvres_xg_reference as upstream_ref
 
         from vllm_ascend.ops.triton.fla.rwkv7_epilogue import rwkv7_lnx_rkvres_xg
 

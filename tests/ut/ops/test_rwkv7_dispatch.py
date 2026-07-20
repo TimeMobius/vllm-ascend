@@ -334,10 +334,10 @@ class TestRWKV7PatchWiring(unittest.TestCase):
             raise unittest.SkipTest("NPU not available, skipping patch wiring tests")
 
     def test_ops_module_imports_ascend_operations(self):
-        """Verify vllm.model_executor.layers.fla.ops.rwkv7 can be patched."""
+        """Verify the local RWKV7 FLA ops can be patched."""
         # This tests that the patching mechanism works
         # The actual patching is done at import time by patch_rwkv7.py
-        import vllm.model_executor.layers.fla.ops.rwkv7 as ops_module
+        import vllm_ascend.ops.triton.fla.rwkv7 as ops_module
 
         # Verify module has the expected functions
         self.assertTrue(hasattr(ops_module, "rwkv7_mix6"))
@@ -397,7 +397,7 @@ class TestRWKV7PatchDoesNotModifyUpstream(unittest.TestCase):
         This is a structural test to ensure the patching follows the
         "minimal patch" principle.
         """
-        import vllm.model_executor.layers.fla.ops.rwkv7 as ops_module
+        import vllm_ascend.ops.triton.fla.rwkv7 as ops_module
 
         # The ops module should have rwkv7_mix6 function
         # We can't directly test if it's been patched without importing

@@ -34,7 +34,7 @@ class TestRWKV7NPUReferencePath(unittest.TestCase):
 
     def test_rwkv7_recurrent_reference_on_npu(self):
         """Verify rwkv7_recurrent_reference produces correct output shapes on NPU."""
-        from vllm.model_executor.layers.fla.ops.rwkv7 import rwkv7_recurrent_reference
+        from vllm_ascend.ops.triton.fla.rwkv7 import rwkv7_recurrent_reference
 
         B, T, H, K, V = 1, 4, 2, 8, 16
         r = torch.randn(B, T, H, K, device='npu', dtype=torch.float32)
@@ -66,7 +66,7 @@ class TestRWKV7NPUReferencePath(unittest.TestCase):
 
     def test_rwkv7_mix6_reference_on_npu(self):
         """Verify rwkv7_mix6_reference produces correct output on NPU."""
-        from vllm.model_executor.layers.fla.ops.rwkv7 import rwkv7_mix6_reference
+        from vllm_ascend.ops.triton.fla.rwkv7 import rwkv7_mix6_reference
 
         batch, seq, hidden = 2, 8, 64
         hidden_states = torch.randn(batch, seq, hidden, device='npu', dtype=torch.float32)
@@ -97,7 +97,7 @@ class TestRWKV7NPUReferencePath(unittest.TestCase):
 
     def test_rwkv7_kk_pre_reference_on_npu(self):
         """Verify rwkv7_kk_pre_reference produces correct output on NPU."""
-        from vllm.model_executor.layers.fla.ops.rwkv7 import rwkv7_kk_pre_reference
+        from vllm_ascend.ops.triton.fla.rwkv7 import rwkv7_kk_pre_reference
 
         k = torch.randn(19, 8, 64, device='npu', dtype=torch.float32)
         a = torch.randn_like(k)
@@ -120,7 +120,7 @@ class TestRWKV7NPUReferencePath(unittest.TestCase):
 
     def test_fused_mul_recurrent_falls_back_to_reference_on_npu(self):
         """Verify fused_mul_recurrent_rwkv7 falls back to reference on NPU."""
-        from vllm.model_executor.layers.fla.ops.rwkv7 import (
+        from vllm_ascend.ops.triton.fla.rwkv7 import (
             fused_mul_recurrent_rwkv7,
             rwkv7_recurrent_reference,
         )
@@ -154,7 +154,7 @@ class TestRWKV7NPUReferencePath(unittest.TestCase):
 
     def test_rwkv7_lnx_rkvres_xg_reference_on_npu(self):
         """Verify rwkv7_lnx_rkvres_xg_reference works on NPU."""
-        from vllm.model_executor.layers.fla.ops.rwkv7 import rwkv7_lnx_rkvres_xg_reference
+        from vllm_ascend.ops.triton.fla.rwkv7 import rwkv7_lnx_rkvres_xg_reference
 
         num_tokens = 17
         num_heads = 4

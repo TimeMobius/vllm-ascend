@@ -118,7 +118,9 @@ class TestRWKV7KKPreCPUReference(unittest.TestCase):
     def test_reference_matches_upstream(self):
         """Verify our reference matches upstream implementation."""
         from vllm_ascend.ops.triton.fla.rwkv7_kk_pre import rwkv7_kk_pre_reference
-        from vllm.model_executor.layers.fla.ops.rwkv7 import rwkv7_kk_pre_reference as upstream
+        from vllm_ascend.ops.triton.fla.rwkv7 import (
+            rwkv7_kk_pre_reference as upstream
+        )
 
         T, H, K = 19, 8, 64
         torch.manual_seed(42)
