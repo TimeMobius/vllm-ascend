@@ -260,7 +260,7 @@ def _patch_rwkv7_recurrent_scan():
 
     # Import the upstream module
     try:
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
     except ImportError:
         # Upstream module not available, nothing to patch
         return
@@ -352,7 +352,7 @@ def _patch_rwkv7_recurrent_scan_varlen():
     ops = _get_ascend_ops()
 
     try:
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
     except ImportError:
         return
 
@@ -449,7 +449,7 @@ def _patch_finalize_attention_output():
     ops = _get_ascend_ops()
 
     try:
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
         RWKV7Attention = rwkv7_module.RWKV7Attention
     except ImportError:
         return
@@ -556,7 +556,7 @@ def _patch_recurrent_inputs():
     ops = _get_ascend_ops()
 
     try:
-        rwkv7_module = importlib.import_module("vllm.model_executor.models.rwkv7")
+        rwkv7_module = importlib.import_module("vllm_ascend.models.rwkv7")
         RWKV7Attention = rwkv7_module.RWKV7Attention
     except ImportError:
         return
