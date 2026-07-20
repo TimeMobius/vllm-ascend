@@ -376,24 +376,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
-std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
-    const at::Tensor &x1,
-    const at::Tensor &x2,
-    const at::Tensor &residual,
-    const at::Tensor &gamma,
-    c10::string_view group_tp,
-    int64_t tp_rank_size,
-    int64_t tp_rank_id,
-    double epsilon,
-    bool is_trans_b,
-    bool is_gather_add_out)
-    {
-        at::Tensor output = at::empty_like(residual);
-        at::Tensor add_out = at::empty_like(residual);
-
-        return {output, add_out};
-    }
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_custom_meta(
     const at::Tensor &x, const at::Tensor &expert_idx,
     const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
@@ -545,44 +527,6 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor y = at::empty_symint(x1.sym_sizes(), x1.options());
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
-}
-
-at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq,
-                                           const at::Tensor& hashkCache,
-                                           const at::Tensor& slotMapping,
-                                           const at::Tensor& seqLen,
-                                           const at::Tensor& hashkCacheOut) {
-    at::Tensor output = at::empty_symint(
-        hashkCache.sym_sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));
-    return output;
-}
-
-
-at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq,
-                                       const at::Tensor &hashkCache,
-                                       const at::Tensor& hashkCacheRope,
-                                       const at::Tensor &topN,
-                                       const at::Tensor &seqLen,
-                                       const c10::optional<at::Tensor> &chunkSize,
-                                       const c10::optional<int64_t> maxSeqLen,
-                                       const c10::optional<int64_t> sink,
-                                       const c10::optional<int64_t> recent,
-                                       const c10::optional<int64_t> supportOffload,
-                                       const c10::optional<at::Tensor> &blockTable,
-                                       const c10::optional<at::Tensor> &mask,
-                                       const c10::optional<at::Tensor>& indices) {
-    if (indices.has_value()) {
-        return at::empty_like(indices.value());
-    }
-    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
-
-    auto n_bs = hashq.sym_size(0);
-    auto n_kv_heads = hashkCache.sym_size(1);
-    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
-    at::Tensor out = at::empty_symint(
-        c10::SymDimVector{n_bs, n_kv_heads, c10::SymInt(n_max_kv)},
-        torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
-    return out;
 }
 
 at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
@@ -751,34 +695,10 @@ std::tuple<at::Tensor, at::Tensor> npu_rwkv7_alt_recurrent_meta(
     const c10::optional<at::Tensor>& initial_state)
 {
     const int64_t batch_size = r.size(0);
-    const int64_t seq_len = r.size(1);
     const int64_t num_heads = r.size(2);
-    const int64_t head_dim = r.size(3);
-
     auto out = at::empty_symint(r.sym_sizes(), r.options());
     auto final_state = at::empty_symint(c10::SymDimVector{batch_size, num_heads, 64, 64}, r.options());
     return {out, final_state};
-}
-
-std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
-    const at::Tensor& A_log,
-    const at::Tensor& a,
-    const at::Tensor& b,
-    const at::Tensor& dt_bias,
-    double beta,
-    double threshold)
-{
-    (void)beta;
-    (void)threshold;
-    auto batch = a.sym_size(0);
-    auto num_heads = a.sym_size(1);
-
-    at::Tensor g = at::empty_symint(
-        c10::SymDimVector{c10::SymInt(1), batch, num_heads}, a.options().dtype(c10::kFloat));
-    at::Tensor beta_output = at::empty_symint(
-        c10::SymDimVector{c10::SymInt(1), batch, num_heads}, b.options());
-
-    return std::make_tuple(g, beta_output);
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -1697,7 +1617,7 @@ void store_kv_block(
 {
     return;
 
-} 
+}
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -1757,8 +1677,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // matmul allreduce add rmsnorm
-    ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
     // moe_init_routing_custom
     ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
     // Moe_gating_top_k
@@ -1767,10 +1685,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
-    // hamming_dist_top_k
-    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
-    // reshape_and_cache_bnsd
-    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
     // npu_sign_bits_pack
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
@@ -1814,8 +1728,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
-    // npu_fused_gdn_gating
-    ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
     // rwkv7_alt_recurrent
     ops.impl("npu_rwkv7_alt_recurrent", &vllm_ascend::meta::npu_rwkv7_alt_recurrent_meta);
 }
