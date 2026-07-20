@@ -6,7 +6,8 @@
 
 **事实陈述：**
 
-- RWKV7 上游实现位于 `vllm/model_executor/models/rwkv7.py` 和 `vllm/model_executor/layers/fla/ops/rwkv7.py`
+- RWKV7 的语义参考实现位于私有 vLLM 分支；可运行的模型实现位于
+  `vllm_ascend/models/rwkv7.py`，配置位于 `vllm_ascend/models/rwkv7_config.py`
 - RWKV7 上游 CUDA 实现位于 `/mnt/data/Codes/vllm/csrc/rwkv7_alt_recurrent.cu`（vLLM 上游 CUDA 实现，供模式参考）
 - vLLM Ascend 已知参考路径（Path A）已在 `tests/ut/ops/test_rwkv7_npu.py` 中验证通过，使用 torch fallback 在 NPU 上运行
 - RWKV7 支持通过 `RWKV7_DISABLE_FUSED_RECURRENT=1` 环境变量强制使用 reference path
@@ -19,9 +20,10 @@
 
 ## 2. 源码边界与只读约定
 
-### 2.1 上游 vLLM 源码 — 只读参考
+### 2.1 私有 vLLM 源码 — 只读参考
 
-`/mnt/data/Codes/vllm` 目录为只读参考实现，**不得直接修改**。所有 vLLM 上游的改动必须通过官方渠道提交 PR 后，在 vllm-ascend 中通过 patch 机制适配。
+`/mnt/data/Codes/vllm` 目录仅作为 RWKV7 语义和 API 参考，**不得直接修改**。主线发行版通过
+`vllm-ascend` 的 general plugin 注册 RWKV7 模型和配置，不依赖上游包含 RWKV7。
 
 相关上游文件（仅作语义参考）：
 
@@ -42,9 +44,9 @@
 
 ### 2.3 保留上游实现模式
 
-本方案**不追求**用单一 WKV7 kernel 替换所有上游路径。正确做法是：
+本方案**不追求**用单一 WKV7 kernel 替换所有模型路径。正确做法是：
 
-1. **Path A（Torch Reference）**：已验证，利用上游 torch fallback 在 NPU 上运行
+1. **Path A（Torch Reference）**：利用本地模型中的 torch reference 在 NPU 上运行
 2. **Path B（Triton-Ascend FLA）**：将 RWKV7 的 triton FLA 操作（mix6、kk_pre、lnx_rkvres_xg、fused_mul_recurrent_rwkv7）映射到 triton-ascend 等价实现
 3. **Path C（AscendC WKV7）**：开发独立的 AscendC WKV7 kernel（不预设与 GDN kernel 的复用）
 
@@ -220,9 +222,12 @@ Checkpoint 路径：`/hikscale/models/RWKV/rwkv-step-12250-bf16-hf`
 
 ```
 vllm_ascend/
+├── models/
+│   ├── rwkv7.py                    # 独立 RWKV7 模型实现
+│   └── rwkv7_config.py             # 独立 RWKV7 配置
 ├── patch/
 │   └── worker/
-│       └── patch_rwkv7.py          # RWKV7 worker patch（如运行时需 patch）
+│       └── patch_rwkv7.py          # 本地模型的 kernel dispatch patch
 ├── ops/
 │   ├── rwkv7_attention.py          # Ascend RWKV7Attention wrapper
 │   └── triton/
@@ -247,7 +252,7 @@ vllm_ascend/
 
 **交付物**：
 
-- 确认 `/mnt/data/Codes/vllm` 为只读参考
+- 确认 `/mnt/data/Codes/vllm` 仅作为只读参考
 - 确认 NPU 可用性和 CANN 版本（**待验证**）
 - 确认环境变量 `RWKV7_DISABLE_FUSED_RECURRENT` 可用
 
@@ -264,7 +269,7 @@ vllm_ascend/
 **交付物**：
 
 - 端到端测试验证模型可推理
-- 如运行时验证需要 worker patch，则添加 `vllm_ascend/patch/worker/patch_rwkv7.py`
+- 通过 `vllm_ascend/models/__init__.py` 注册 `RWKV7Config` 和 `RWKV7ForCausalLM`
 
 **验收标准**：
 
@@ -423,7 +428,7 @@ RWKV7_DISABLE_FUSED_RECURRENT=1   # 强制使用 reference path
 2. **不添加** placeholder YAML metrics（测试结果待实测后填充）
 3. **不创建** todos 或 commits（设计文档阶段）
 4. **不声称** triton-ascend RWKV7 支持已可用（Phase 2 才可能实现）
-5. **不修改** `/mnt/data/Codes/vllm`（只读参考）
+5. **不修改** `/mnt/data/Codes/vllm`（只读参考），模型和配置由 `vllm-ascend` 独立提供
 6. **不替换** 所有上游路径为单一 WKV7 kernel（保留多路径fallback）
 7. **不预设** benchmark 或 accuracy 具体数值（待实测）
 

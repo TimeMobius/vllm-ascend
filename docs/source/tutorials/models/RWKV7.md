@@ -2,7 +2,9 @@
 
 ## 1 Introduction
 
-RWKV7 是线性注意力（Rwkv7）架构的最新版本，核心算子为 WKV7 循环算子和混合投影逻辑。vLLM 上游实现在 `vllm/model_executor/models/rwkv7.py` 和 `vllm/model_executor/layers/fla/ops/rwkv7.py`。
+RWKV7 是线性注意力（Rwkv7）架构的最新版本，核心算子为 WKV7 循环算子和混合投影逻辑。模型和配置由
+`vllm-ascend` 独立提供，分别位于 `vllm_ascend/models/rwkv7.py` 和
+`vllm_ascend/models/rwkv7_config.py`。
 
 ## 2 Supported Features
 
@@ -17,7 +19,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - **Path**: `/hikscale/models/RWKV/rwkv-step-12250-bf16-hf`
 - **结构**: 61 层，hidden 4096，64 heads，head_dim 64，bf16，max_position 86016
 - **Tokenizer**: 自定义 tokenizer
-- **参考上游源码**: `/mnt/data/Codes/vllm`（只读参考实现，**不得直接修改**）
+- **参考源码**: `/mnt/data/Codes/vllm`（只读语义和 API 参考，**不得直接修改**）
 - **CUDA 语义引用**: RWKV-LM 仓库 `RWKV-v7/cuda` 分支
 - **AscendC 语义引用**: gitcode `appleinsky/rwkv_Ascend` 分支
 
@@ -88,7 +90,7 @@ vllm serve /hikscale/models/RWKV/rwkv-step-12250-bf16-hf \
 
 ### 5.2 Device Gating 说明
 
-上游通过 `hidden_states.device.type == "cuda"` 判断使用 fused kernel。vllm-ascend patch（commit `7c3bc04c`）在 NPU 上尝试启用 triton-ascend FLA dispatch，**当 dispatch 可用时优先使用，否则自动回退到 torch reference path**。环境变量 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可显式禁用 fused path，强制使用 torch reference。
+本地 RWKV7 模型在 NPU 上直接调用 vllm-ascend 的 Triton-Ascend FLA dispatch，**当 dispatch 不可用时自动回退到 torch reference path**。环境变量 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可显式禁用 fused path，强制使用 torch reference。
 
 ## 6 Functional Verification
 
