@@ -583,8 +583,9 @@ class TestRWKV7ProjectionIntegration(unittest.TestCase):
         value_end = value_start + local_value_dim
 
         class MockLoRA:
-            def __init__(self, dim):
-                self.weight = torch.randn(dim, dim, device=device, dtype=torch.float32)
+            def __init__(self, input_dim, output_dim=None):
+                output_dim = input_dim if output_dim is None else output_dim
+                self.weight = torch.randn(output_dim, input_dim, device=device, dtype=torch.float32)
 
             def __call__(self, x):
                 return torch.nn.functional.linear(x, self.weight)
@@ -630,7 +631,7 @@ class TestRWKV7ProjectionIntegration(unittest.TestCase):
                 self.a_lora = MockLoRA(hidden_size)
                 self.g_lora = MockLoRA(hidden_size)
                 if layer_idx != 0:
-                    self.v_lora = MockLoRA(hidden_size)
+                    self.v_lora = MockLoRA(hidden_size, local_value_dim)
 
         return MockAttention()
 

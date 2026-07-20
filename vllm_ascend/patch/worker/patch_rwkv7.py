@@ -584,6 +584,7 @@ def _patch_recurrent_inputs():
 
         # Try mix6 kernel first for the 6 mixing operations
         mix6_guard_passed = False
+        mix6_used = False
         if _can_use_mix6_kernel(
             hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g
         ):

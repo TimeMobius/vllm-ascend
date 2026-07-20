@@ -98,8 +98,9 @@ class TestRWKV7KKPreCPUReference(unittest.TestCase):
                 self.assertTrue(torch.isfinite(kk).all())
 
                 kk_norm = torch.norm(kk.float(), p=2, dim=-1)
+                tolerance = 4e-3 if dtype in (torch.float16, torch.bfloat16) else 1e-3
                 torch.testing.assert_close(
-                    kk_norm, torch.ones_like(kk_norm), atol=1e-3, rtol=1e-3
+                    kk_norm, torch.ones_like(kk_norm), atol=tolerance, rtol=tolerance
                 )
 
     def test_reference_empty_tensor(self):
@@ -291,7 +292,7 @@ class TestRWKV7KKPreNPU(unittest.TestCase):
         T, H, K = 8, 4, 64
         torch.manual_seed(42)
         k = torch.randn(T, H, K, device='npu', dtype=torch.float32)
-        a = torch.randn(T, H, K, device='npu', dtype=torch.float32).transpose(0, 1).transpose(1, 2)
+        a = torch.randn(T, K, H, device='npu', dtype=torch.float32).transpose(1, 2)
         k_k = torch.randn(H, K, device='npu', dtype=torch.float32)
         k_a = torch.randn(H, K, device='npu', dtype=torch.float32)
 

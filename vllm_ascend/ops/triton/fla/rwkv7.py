@@ -16,8 +16,14 @@ from vllm_ascend.ops.triton.fla.rwkv7_mix6 import (
     rwkv7_mix6_reference,
 )
 
+
+def fused_mul_recurrent_rwkv7(*args, **kwargs):
+    output, final_state, _ = fused_recurrent_rwkv7(*args, **kwargs)
+    return output, final_state
+
 __all__ = [
     "fused_recurrent_rwkv7",
+    "fused_mul_recurrent_rwkv7",
     "rwkv7_recurrent_reference",
     "rwkv7_recurrent_reference_with_checkpoints",
     "rwkv7_lnx_rkvres_xg",
