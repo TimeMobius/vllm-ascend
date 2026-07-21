@@ -107,6 +107,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # hit/fallback behavior on real workloads; it does not change dispatch
     # decisions or kernel math.
     "VLLM_ASCEND_RWKV7_PROFILE": lambda: int(os.getenv("VLLM_ASCEND_RWKV7_PROFILE", "0")),
+    # Force RWKV7 Triton dispatches to use the PyTorch reference implementations.
+    # 0: use the normal Triton dispatch guards; 1: disable all RWKV7 Triton ops.
+    "VLLM_ASCEND_RWKV7_DISABLE_TRITON": lambda: int(
+        os.getenv("VLLM_ASCEND_RWKV7_DISABLE_TRITON", "0")
+    ),
 }
 
 # end-env-vars-definition

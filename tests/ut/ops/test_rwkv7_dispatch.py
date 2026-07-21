@@ -16,6 +16,7 @@ These tests are complementary to:
 """
 
 import unittest
+from unittest import mock
 
 import torch
 
@@ -162,6 +163,66 @@ class TestRWKV7FallbackOnCPU(unittest.TestCase):
         # Should match since fallback is used
         torch.testing.assert_close(wrapper_k_adj, ref_k_adj, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(wrapper_kk, ref_kk, atol=1e-5, rtol=1e-5)
+
+    def test_disable_triton_forces_rwkv7_guards_off(self):
+        """Verify the reference-only switch disables every RWKV7 kernel guard."""
+        from vllm_ascend.patch.worker.patch_rwkv7 import (
+            _can_use_epilogue_kernel,
+            _can_use_fused_recurrent,
+            _can_use_kk_pre_kernel,
+            _can_use_mix6_kernel,
+        )
+
+        hidden_states = torch.randn(2, 4, 64)
+        delta = torch.randn_like(hidden_states)
+        vector = torch.randn(64)
+        recurrent = torch.randn(2, 4, 8)
+        head_vector = torch.randn(2, 4, 8)
+        head_matrix = torch.randn(2, 8)
+
+        with mock.patch.dict("os.environ", {"VLLM_ASCEND_RWKV7_DISABLE_TRITON": "1"}):
+            self.assertFalse(
+                _can_use_mix6_kernel(
+                    hidden_states,
+                    delta,
+                    vector,
+                    vector,
+                    vector,
+                    vector,
+                    vector,
+                    vector,
+                )
+            )
+            self.assertFalse(
+                _can_use_kk_pre_kernel(
+                    recurrent,
+                    head_matrix,
+                    recurrent,
+                    head_matrix,
+                )
+            )
+            self.assertFalse(
+                _can_use_fused_recurrent(
+                    recurrent,
+                    recurrent,
+                    recurrent,
+                    head_vector,
+                    recurrent,
+                    recurrent,
+                )
+            )
+            self.assertFalse(
+                _can_use_epilogue_kernel(
+                    head_vector,
+                    recurrent,
+                    recurrent,
+                    head_vector,
+                    head_matrix,
+                    vector,
+                    vector,
+                    head_vector,
+                )
+            )
 
 
 class TestRWKV7RecurrentFallback(unittest.TestCase):

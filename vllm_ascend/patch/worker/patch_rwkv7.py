@@ -40,6 +40,7 @@ from typing import Optional
 
 import torch
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.profiler.rwkv7_counters import (
     dispatch_fallback,
     dispatch_hit,
@@ -116,6 +117,8 @@ def _can_use_fused_recurrent(
     a: torch.Tensor,
 ) -> bool:
     """Check if fused_recurrent_rwkv7 can be used safely."""
+    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+        return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
         return False
@@ -146,6 +149,8 @@ def _can_use_epilogue_kernel(
     g: torch.Tensor,
 ) -> bool:
     """Check if rwkv7_lnx_rkvres_xg can be used safely."""
+    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+        return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
         return False
@@ -190,6 +195,8 @@ def _can_use_mix6_kernel(
     x_g: torch.Tensor,
 ) -> bool:
     """Check if rwkv7_mix6 can be used safely."""
+    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+        return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
         return False
@@ -220,6 +227,8 @@ def _can_use_kk_pre_kernel(
     k_a: torch.Tensor,
 ) -> bool:
     """Check if rwkv7_kk_pre can be used safely."""
+    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+        return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
         return False
