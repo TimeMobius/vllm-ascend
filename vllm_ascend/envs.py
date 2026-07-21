@@ -112,6 +112,26 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_RWKV7_DISABLE_TRITON": lambda: int(
         os.getenv("VLLM_ASCEND_RWKV7_DISABLE_TRITON", "0")
     ),
+    # RWKV7 performance controls. Each switch defaults to the reference path;
+    # enable one operator at a time when validating an NPU kernel.
+    "RWKV7_USE_FUSED_MIX6": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_MIX6", "0"))),
+    "RWKV7_USE_FUSED_KK_PRE": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_KK_PRE", "0"))),
+    "RWKV7_USE_FUSED_LNX_RKVRES_XG": lambda: bool(
+        int(os.getenv("RWKV7_USE_FUSED_LNX_RKVRES_XG", "0"))
+    ),
+    "RWKV7_USE_FUSED_CMIX": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_CMIX", "0"))),
+    "RWKV7_USE_DIRECT_LINEAR": lambda: bool(
+        int(os.getenv("RWKV7_USE_DIRECT_LINEAR", "0"))
+    ),
+    "RWKV7_USE_ALT_RECURRENT_KERNEL": lambda: bool(
+        int(os.getenv("RWKV7_USE_ALT_RECURRENT_KERNEL", "0"))
+    ),
+    "RWKV7_DISABLE_FUSED_PREFILL": lambda: bool(
+        int(os.getenv("RWKV7_DISABLE_FUSED_PREFILL", "0"))
+    ),
+    "RWKV7_DISABLE_FUSED_RECURRENT": lambda: bool(
+        int(os.getenv("RWKV7_DISABLE_FUSED_RECURRENT", "0"))
+    ),
 }
 
 # end-env-vars-definition
