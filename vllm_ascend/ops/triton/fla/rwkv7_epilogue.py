@@ -23,6 +23,8 @@
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+MAX_GRID_DIM = 65535
+
 
 @triton.jit(do_not_specialize=["eps"])
 def rwkv7_lnx_rkvres_xg_fwd_kernel(
@@ -35,6 +37,7 @@ def rwkv7_lnx_rkvres_xg_fwd_kernel(
     bias,
     g,
     out,
+    row_start,
     num_heads,
     head_dim,
     head_v_dim,
@@ -55,8 +58,9 @@ def rwkv7_lnx_rkvres_xg_fwd_kernel(
         bias: [num_heads * head_v_dim] - group norm bias
         g: [num_tokens, num_heads * head_v_dim] - gating
         out: [num_tokens, num_heads * head_v_dim] - output
+        row_start: first global token-head row processed by this launch
     """
-    row_head = tl.program_id(0).to(tl.int64)
+    row_head = (tl.program_id(0) + row_start).to(tl.int64)
     head_idx = row_head % num_heads
     token_idx = row_head // num_heads
 
@@ -239,25 +243,28 @@ def rwkv7_lnx_rkvres_xg(
 
     # Launch kernel
     num_warps = 4 if max(block_k, block_v) <= 64 else 8
-    grid = (num_tokens * num_heads,)
-    rwkv7_lnx_rkvres_xg_fwd_kernel[grid](
-        recurrent_output=recurrent_output,
-        r=r,
-        k=k,
-        v=v,
-        r_k=r_k,
-        weight=weight,
-        bias=bias,
-        g=g,
-        out=out,
-        num_heads=num_heads,
-        head_dim=head_dim,
-        head_v_dim=head_v_dim,
-        eps=eps,
-        BLOCK_K=block_k,
-        BLOCK_V=block_v,
-        num_warps=num_warps,
-    )
+    total_rows = num_tokens * num_heads
+    for row_start in range(0, total_rows, MAX_GRID_DIM):
+        chunk_rows = min(MAX_GRID_DIM, total_rows - row_start)
+        rwkv7_lnx_rkvres_xg_fwd_kernel[(chunk_rows,)](
+            recurrent_output=recurrent_output,
+            r=r,
+            k=k,
+            v=v,
+            r_k=r_k,
+            weight=weight,
+            bias=bias,
+            g=g,
+            out=out,
+            row_start=row_start,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            head_v_dim=head_v_dim,
+            eps=eps,
+            BLOCK_K=block_k,
+            BLOCK_V=block_v,
+            num_warps=num_warps,
+        )
     return out
 
 

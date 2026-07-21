@@ -229,6 +229,53 @@ class TestRWKV7EpilogueGroupNormSemantics(unittest.TestCase):
         torch.testing.assert_close(ref_out, triton_out, atol=1e-4, rtol=1e-4)
         self.assertFalse(torch.allclose(ref_out[0], ref_out[1]))
 
+    def test_large_grid_parity(self):
+        """Verify token-head rows above the Ascend grid limit remain correct."""
+        from vllm_ascend.ops.triton.fla.rwkv7_epilogue import (
+            rwkv7_lnx_rkvres_xg,
+            rwkv7_lnx_rkvres_xg_reference,
+        )
+
+        num_tokens, num_heads, head_dim, head_v_dim = 2048, 64, 64, 64
+        eps = 64e-5
+        recurrent_output = torch.randn(
+            num_tokens, num_heads, head_v_dim, device="npu", dtype=torch.float32
+        )
+        r = torch.randn(num_tokens, num_heads, head_dim, device="npu")
+        k = torch.randn_like(r)
+        v = torch.randn_like(recurrent_output)
+        r_k = torch.randn(num_heads, head_dim, device="npu")
+        weight = torch.randn(num_heads * head_v_dim, device="npu")
+        bias = torch.randn(num_heads * head_v_dim, device="npu")
+        g = torch.randn(
+            num_tokens, num_heads * head_v_dim, device="npu", dtype=torch.float32
+        )
+
+        ref_out = rwkv7_lnx_rkvres_xg_reference(
+            recurrent_output=recurrent_output,
+            r=r,
+            k=k,
+            v=v,
+            r_k=r_k,
+            weight=weight,
+            bias=bias,
+            g=g,
+            eps=eps,
+        )
+        triton_out = rwkv7_lnx_rkvres_xg(
+            recurrent_output=recurrent_output,
+            r=r,
+            k=k,
+            v=v,
+            r_k=r_k,
+            weight=weight,
+            bias=bias,
+            g=g,
+            eps=eps,
+        )
+
+        torch.testing.assert_close(triton_out, ref_out, atol=1e-4, rtol=1e-4)
+
 
 if __name__ == "__main__":
     unittest.main()
