@@ -39,6 +39,7 @@ import importlib
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from vllm_ascend import envs as envs_ascend
 from vllm_ascend.profiler.rwkv7_counters import (
@@ -117,7 +118,11 @@ def _can_use_fused_recurrent(
     a: torch.Tensor,
 ) -> bool:
     """Check if fused_recurrent_rwkv7 can be used safely."""
-    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+    if (
+        envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
+        or envs_ascend.RWKV7_DISABLE_FUSED_RECURRENT
+        or envs_ascend.RWKV7_DISABLE_FUSED_PREFILL
+    ):
         return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
@@ -149,7 +154,10 @@ def _can_use_epilogue_kernel(
     g: torch.Tensor,
 ) -> bool:
     """Check if rwkv7_lnx_rkvres_xg can be used safely."""
-    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+    if (
+        envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
+        or not envs_ascend.RWKV7_USE_FUSED_LNX_RKVRES_XG
+    ):
         return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
@@ -195,7 +203,10 @@ def _can_use_mix6_kernel(
     x_g: torch.Tensor,
 ) -> bool:
     """Check if rwkv7_mix6 can be used safely."""
-    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+    if (
+        envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
+        or not envs_ascend.RWKV7_USE_FUSED_MIX6
+    ):
         return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
@@ -227,7 +238,10 @@ def _can_use_kk_pre_kernel(
     k_a: torch.Tensor,
 ) -> bool:
     """Check if rwkv7_kk_pre can be used safely."""
-    if envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON:
+    if (
+        envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
+        or not envs_ascend.RWKV7_USE_FUSED_KK_PRE
+    ):
         return False
     ops = _get_ascend_ops()
     if not ops.HAS_TRITON:
@@ -255,6 +269,52 @@ def _can_use_kk_pre_kernel(
     if k_k.shape != k_a.shape:
         return False
     return True
+
+
+def _can_use_alt_recurrent(
+    r: torch.Tensor,
+    w: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kk: torch.Tensor,
+    a: torch.Tensor,
+    initial_state: torch.Tensor | None,
+) -> bool:
+    if envs_ascend.RWKV7_DISABLE_FUSED_RECURRENT:
+        return False
+    if not envs_ascend.RWKV7_USE_ALT_RECURRENT_KERNEL:
+        return False
+    if not _is_npu_available() or r.device.type != "npu" or r.numel() == 0:
+        return False
+    if r.shape[-1] != 64 or v.shape[-1] != 64:
+        return False
+    tensors = (r, w, k, v, kk, a)
+    if not all(t.dtype == torch.float32 and t.is_contiguous() for t in tensors):
+        return False
+    if initial_state is not None:
+        if initial_state.shape != (r.shape[1], 64, 64):
+            return False
+        if initial_state.dtype != torch.float32 or not initial_state.is_contiguous():
+            return False
+    return hasattr(torch.ops.ascend, "npu_rwkv7_alt_recurrent")
+
+
+def _can_use_direct_linear(linear, hidden_states: torch.Tensor) -> bool:
+    quant_method = getattr(linear, "quant_method", None)
+    return (
+        envs_ascend.RWKV7_USE_DIRECT_LINEAR
+        and hidden_states.device.type == "npu"
+        and getattr(linear, "tp_size", 1) == 1
+        and getattr(quant_method, "__class__", type(None)).__name__
+        == "UnquantizedLinearMethod"
+    )
+
+
+def _direct_linear(linear, hidden_states: torch.Tensor) -> torch.Tensor:
+    bias = None
+    if getattr(linear, "bias", None) is not None and not linear.skip_bias_add:
+        bias = linear.bias
+    return F.linear(hidden_states, linear.weight, bias)
 
 
 def _patch_rwkv7_recurrent_scan():
@@ -296,6 +356,27 @@ def _patch_rwkv7_recurrent_scan():
         When conditions aren't met (non-NPU, wrong shapes, Triton unavailable),
         falls back to the exact upstream reference implementation.
         """
+        if _can_use_alt_recurrent(r, w, k, v, kk, a, initial_state):
+            try:
+                initial_state_npu = (
+                    None
+                    if initial_state is None
+                    else initial_state.transpose(-1, -2).unsqueeze(0).contiguous()
+                )
+                output, final_state = torch.ops.ascend.npu_rwkv7_alt_recurrent(
+                    r.unsqueeze(0),
+                    w.unsqueeze(0),
+                    k.unsqueeze(0),
+                    v.unsqueeze(0),
+                    kk.unsqueeze(0),
+                    a.unsqueeze(0),
+                    initial_state_npu,
+                )
+                dispatch_hit(DispatchKind.RECURRENT_SCAN)
+                return output.squeeze(0), final_state.squeeze(0).transpose(-1, -2)
+            except Exception:
+                dispatch_fallback(DispatchKind.RECURRENT_SCAN, "alt_kernel_exception")
+
         if not _can_use_fused_recurrent(r, w, k, v, kk, a):
             dispatch_fallback(DispatchKind.RECURRENT_SCAN, "guard_false")
             return original_recurrent_scan(r, w, k, v, kk, a, initial_state)
@@ -535,7 +616,10 @@ def _patch_finalize_attention_output():
             )
             dispatch_hit(DispatchKind.EPILOGUE)
             output = output.to(hidden_dtype)
-            output, _ = self.o_proj(output)
+            if _can_use_direct_linear(self.o_proj, output):
+                output = _direct_linear(self.o_proj, output)
+            else:
+                output, _ = self.o_proj(output)
             return output
         except Exception:
             dispatch_fallback(DispatchKind.EPILOGUE, "kernel_exception")
@@ -625,10 +709,19 @@ def _patch_recurrent_inputs():
             if not mix6_guard_passed:
                 dispatch_fallback(DispatchKind.MIX6, "guard_false")
 
-        r, _ = self.r_proj(xr)
+        if _can_use_direct_linear(self.r_proj, xr):
+            r = _direct_linear(self.r_proj, xr)
+        else:
+            r, _ = self.r_proj(xr)
         w = LOG_DECAY_SCALE * self.w_lora(xw).sigmoid()
-        k, _ = self.k_proj(xk)
-        v, _ = self.v_proj(xv)
+        if _can_use_direct_linear(self.k_proj, xk):
+            k = _direct_linear(self.k_proj, xk)
+        else:
+            k, _ = self.k_proj(xk)
+        if _can_use_direct_linear(self.v_proj, xv):
+            v = _direct_linear(self.v_proj, xv)
+        else:
+            v, _ = self.v_proj(xv)
 
         if self.layer_idx == 0:
             v_first_out = v
@@ -688,6 +781,65 @@ def _patch_recurrent_inputs():
     RWKV7Attention._ASCEND_PROJECTION_PATCHED = True
 
 
+def _patch_linear_attention_metadata():
+    """Expose cache-all block indices on vLLM's linear attention metadata."""
+    try:
+        linear_attn = importlib.import_module("vllm.v1.attention.backends.linear_attn")
+    except ImportError:
+        return
+
+    builder = linear_attn.LinearAttentionMetadataBuilder
+    if getattr(builder, "_RWKV7_CACHE_ALL_PATCHED", False):
+        return
+
+    original_build = builder.build
+
+    def build_with_cache_all(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        metadata = original_build(
+            self,
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+        )
+        if self.vllm_config.cache_config.mamba_cache_mode != "all":
+            return metadata
+
+        block_size = self.kv_cache_spec.block_size
+        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+        metadata.state_indices_tensor = common_attn_metadata.block_table_tensor
+        metadata.num_computed_tokens = num_computed_tokens
+        metadata.block_idx_last_computed_token = torch.clamp(
+            torch.div(
+                num_computed_tokens + block_size - 1,
+                block_size,
+                rounding_mode="floor",
+            )
+            - 1,
+            min=0,
+        )
+        metadata.block_idx_first_scheduled_token = (
+            torch.div(
+                num_computed_tokens + block_size,
+                block_size,
+                rounding_mode="floor",
+            )
+            - 1
+        )
+        metadata.block_idx_last_scheduled_token = torch.clamp(
+            torch.div(
+                common_attn_metadata.seq_lens + block_size - 1,
+                block_size,
+                rounding_mode="floor",
+            )
+            - 1,
+            min=0,
+        )
+        return metadata
+
+    builder.build = build_with_cache_all
+    builder._RWKV7_CACHE_ALL_PATCHED = True
+
+
 def apply_patch():
     """
     Apply the RWKV7 Ascend patch.
@@ -709,6 +861,7 @@ def apply_patch():
     _patch_rwkv7_recurrent_scan_varlen()
     _patch_finalize_attention_output()
     _patch_recurrent_inputs()
+    _patch_linear_attention_metadata()
 
 
 # Apply the patch when this module is imported
