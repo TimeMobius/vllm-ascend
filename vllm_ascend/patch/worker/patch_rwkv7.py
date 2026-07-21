@@ -228,6 +228,13 @@ def _can_use_mix6_kernel(
     # hidden_states and delta must have same shape
     if hidden_states.shape != delta.shape:
         return False
+    # Skip Triton kernel for small tensors (decode T=1) where
+    # kernel launch overhead dominates; use PyTorch reference instead.
+    # For T >= 4 the fused kernel starts to benefit from parallelism.
+    if hidden_states.ndim == 2 and hidden_states.shape[0] < 4:
+        return False
+    if hidden_states.ndim == 3 and hidden_states.shape[0] < 4:
+        return False
     return True
 
 
@@ -267,6 +274,11 @@ def _can_use_kk_pre_kernel(
     if k.shape != a.shape:
         return False
     if k_k.shape != k_a.shape:
+        return False
+    # Skip Triton kernel for small time dimensions (T=1 decode path).
+    # For single-token decode the kernel launch overhead dominates,
+    # making the PyTorch reference faster.
+    if k.shape[0] < 4:
         return False
     return True
 

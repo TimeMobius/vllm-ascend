@@ -117,7 +117,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     "RWKV7_USE_FUSED_MIX6": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_MIX6", "0"))),
     "RWKV7_USE_FUSED_KK_PRE": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_KK_PRE", "1"))),
     "RWKV7_USE_FUSED_LNX_RKVRES_XG": lambda: bool(
-        int(os.getenv("RWKV7_USE_FUSED_LNX_RKVRES_XG", "0"))
+        int(os.getenv("RWKV7_USE_FUSED_LNX_RKVRES_XG", "1"))
     ),
     "RWKV7_USE_FUSED_CMIX": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_CMIX", "0"))),
     "RWKV7_USE_DIRECT_LINEAR": lambda: bool(
