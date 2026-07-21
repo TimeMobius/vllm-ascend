@@ -587,19 +587,31 @@ def _patch_finalize_attention_output():
         local_value_dim = num_heads * head_v_dim
 
         # Get local r_k slice: [tp_rank * local_num_heads : (tp_rank+1) * local_num_heads, head_dim]
-        local_r_k = self.r_k[
-            self.tp_rank
-            * self.local_num_heads : (self.tp_rank + 1)
-            * self.local_num_heads
-        ].to(torch.float32)
+        _r_k_fp32 = getattr(self, "_ascend_r_k_fp32", None)
+        if _r_k_fp32 is None:
+            _r_k_fp32 = self.r_k[
+                self.tp_rank
+                * self.local_num_heads : (self.tp_rank + 1)
+                * self.local_num_heads
+            ].to(torch.float32).contiguous()
+            self._ascend_r_k_fp32 = _r_k_fp32
+        local_r_k = _r_k_fp32
 
         # Get local weight/bias slices for group norm
-        local_weight = self.g_norm.weight[self.value_start : self.value_end].to(
-            torch.float32
-        )
-        local_bias = self.g_norm.bias[self.value_start : self.value_end].to(
-            torch.float32
-        )
+        _gnorm_w_fp32 = getattr(self, "_ascend_gnorm_w_fp32", None)
+        if _gnorm_w_fp32 is None:
+            _gnorm_w_fp32 = self.g_norm.weight[
+                self.value_start : self.value_end
+            ].to(torch.float32).contiguous()
+            self._ascend_gnorm_w_fp32 = _gnorm_w_fp32
+        _gnorm_b_fp32 = getattr(self, "_ascend_gnorm_b_fp32", None)
+        if _gnorm_b_fp32 is None:
+            _gnorm_b_fp32 = self.g_norm.bias[
+                self.value_start : self.value_end
+            ].to(torch.float32).contiguous()
+            self._ascend_gnorm_b_fp32 = _gnorm_b_fp32
+        local_weight = _gnorm_w_fp32
+        local_bias = _gnorm_b_fp32
 
         # Check if we can use the kernel
         if not _can_use_epilogue_kernel(
@@ -755,17 +767,25 @@ def _patch_recurrent_inputs():
         a = a.view(-1, self.local_num_heads, self.head_dim).to(torch.float32)
         v = v.view(-1, self.local_num_heads, self.head_v_dim).to(torch.float32)
 
-        local_k_k = self.k_k[self.key_start : self.key_end].view(
-            1, self.local_num_heads, self.head_dim
-        )
-        local_k_a = self.k_a[self.key_start : self.key_end].view(
-            1, self.local_num_heads, self.head_dim
-        )
+        # Lazy-cache float32 versions of constant params to avoid
+        # repeated .to(torch.float32) in the decode hot path.
+        _k_k_fp32 = getattr(self, "_ascend_k_k_fp32", None)
+        if _k_k_fp32 is None:
+            _k_k_fp32 = self.k_k[self.key_start : self.key_end].view(
+                1, self.local_num_heads, self.head_dim
+            ).to(torch.float32).contiguous()
+            self._ascend_k_k_fp32 = _k_k_fp32
+        _k_a_fp32 = getattr(self, "_ascend_k_a_fp32", None)
+        if _k_a_fp32 is None:
+            _k_a_fp32 = self.k_a[self.key_start : self.key_end].view(
+                1, self.local_num_heads, self.head_dim
+            ).to(torch.float32).contiguous()
+            self._ascend_k_a_fp32 = _k_a_fp32
 
         # Try kk_pre kernel for fused kk normalization and k adjustment
         # kk_pre expects k_k and k_a as [H, K], but local_k_k/a are [1, H, K]
-        local_k_k_2d = local_k_k.squeeze(0)  # [H, K]
-        local_k_a_2d = local_k_a.squeeze(0)  # [H, K]
+        local_k_k_2d = _k_k_fp32.squeeze(0)  # [H, K]
+        local_k_a_2d = _k_a_fp32.squeeze(0)  # [H, K]
 
         if _can_use_kk_pre_kernel(k, local_k_k_2d, a, local_k_a_2d):
             try:
@@ -780,15 +800,15 @@ def _patch_recurrent_inputs():
             except Exception:
                 dispatch_fallback(DispatchKind.KK_PRE, "kernel_exception")
                 kk = torch.nn.functional.normalize(
-                    k * local_k_k.to(torch.float32), dim=-1, p=2.0
+                    k * _k_k_fp32, dim=-1, p=2.0
                 )
-                k = k * (1 + (a - 1) * local_k_a.to(torch.float32))
+                k = k * (1 + (a - 1) * _k_a_fp32)
         else:
             dispatch_fallback(DispatchKind.KK_PRE, "guard_false")
             kk = torch.nn.functional.normalize(
-                k * local_k_k.to(torch.float32), dim=-1, p=2.0
+                k * _k_k_fp32, dim=-1, p=2.0
             )
-            k = k * (1 + (a - 1) * local_k_a.to(torch.float32))
+            k = k * (1 + (a - 1) * _k_a_fp32)
 
         return r, w, k, v, kk, a, g, v_first_out
 
