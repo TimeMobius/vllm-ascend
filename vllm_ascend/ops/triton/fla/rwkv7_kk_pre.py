@@ -17,6 +17,8 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
+MAX_GRID_DIM = 65535
+
 
 def rwkv7_kk_pre_available() -> bool:
     """Check if triton-ascend is available and can run rwkv7_kk_pre."""
@@ -36,6 +38,7 @@ def rwkv7_kk_pre_fwd_kernel(
     k_out,
     kk_out,
     num_rows,
+    row_start,
     num_heads,
     head_dim,
     eps,
@@ -57,11 +60,12 @@ def rwkv7_kk_pre_fwd_kernel(
         k_out: [num_rows, head_dim] - adjusted key output
         kk_out: [num_rows, head_dim] - normalized kk output
         num_rows: total number of rows (T * H)
+        row_start: first global row processed by this launch
         num_heads: number of attention heads
         head_dim: dimension of each head
         eps: small constant for numerical stability in rsqrt
     """
-    row = tl.program_id(0).to(tl.int64)
+    row = (tl.program_id(0) + row_start).to(tl.int64)
     if row >= num_rows:
         return
 
@@ -200,21 +204,22 @@ def rwkv7_kk_pre(
 
     # Each program processes one row; grid must cover all num_rows.
     init_device_properties_triton()
-    grid_size = num_rows
-
-    rwkv7_kk_pre_fwd_kernel[(grid_size,)](
-        k=k,
-        a=a,
-        k_k=k_k,
-        k_a=k_a,
-        k_out=k_out,
-        kk_out=kk_out,
-        num_rows=num_rows,
-        num_heads=num_heads,
-        head_dim=head_dim,
-        eps=eps,
-        BLOCK_SIZE=block_size,
-        num_warps=num_warps,
-    )
+    for row_start in range(0, num_rows, MAX_GRID_DIM):
+        chunk_rows = min(MAX_GRID_DIM, num_rows - row_start)
+        rwkv7_kk_pre_fwd_kernel[(chunk_rows,)](
+            k=k,
+            a=a,
+            k_k=k_k,
+            k_a=k_a,
+            k_out=k_out,
+            kk_out=kk_out,
+            num_rows=num_rows,
+            row_start=row_start,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            eps=eps,
+            BLOCK_SIZE=block_size,
+            num_warps=num_warps,
+        )
 
     return k_out, kk_out

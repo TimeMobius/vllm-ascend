@@ -213,6 +213,27 @@ class TestRWKV7KKPreNPU(unittest.TestCase):
         torch.testing.assert_close(triton_k_adj, ref_k_adj, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(triton_kk, ref_kk, atol=1e-4, rtol=1e-4)
 
+    def test_triton_parity_large_grid(self):
+        """Verify T*H above the Ascend 1D grid limit remains correct."""
+        from vllm_ascend.ops.triton.fla.rwkv7_kk_pre import (
+            rwkv7_kk_pre,
+            rwkv7_kk_pre_reference,
+        )
+
+        T, H, K = 2048, 64, 64
+        torch.manual_seed(42)
+        k = torch.randn(T, H, K, device="npu", dtype=torch.float32)
+        a = torch.randn_like(k)
+        torch.manual_seed(43)
+        k_k = torch.randn(H, K, device="npu", dtype=torch.float32)
+        k_a = torch.randn(H, K, device="npu", dtype=torch.float32)
+
+        ref_k_adj, ref_kk = rwkv7_kk_pre_reference(k=k, k_k=k_k, a=a, k_a=k_a)
+        triton_k_adj, triton_kk = rwkv7_kk_pre(k=k, k_k=k_k, a=a, k_a=k_a)
+
+        torch.testing.assert_close(triton_k_adj, ref_k_adj, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(triton_kk, ref_kk, atol=1e-4, rtol=1e-4)
+
     def test_triton_parity_different_sizes(self):
         """Verify triton parity across different tensor sizes."""
         from vllm_ascend.ops.triton.fla.rwkv7_kk_pre import rwkv7_kk_pre, rwkv7_kk_pre_reference
