@@ -1065,7 +1065,8 @@ class RWKV7Attention(nn.Module):
             delta,
             v_first,
         )
-        recurrent_state = recurrent_state.to(torch.float32)
+        # recurrent_state is allocated as float32 by get_state_dtype;
+        # skip the redundant .to() call to avoid dispatch overhead.
         final_recurrent_state = _rwkv7_recurrent_step(
             recurrent_state,
             w,
