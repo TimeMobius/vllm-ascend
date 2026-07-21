@@ -29,6 +29,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - **Conda 环境**: `rwkv7`
 - **依赖**: CANN 9.0.0+, PyTorch 2.10.0 + torch-npu 2.10.0
+- **vLLM 版本**: 以仓库根目录 `.github/vllm-release-tag.commit` 为准。运行前可执行
+  `export VLLM_VERSION="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"`
 - **环境变量**: `RWKV7_DISABLE_FUSED_RECURRENT=1` 强制使用 torch reference path
 
 ### 3.3 代码边界说明
@@ -52,19 +54,22 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 > **说明**: 以上为 operator-level 验证，验证的是 torch fallback 在 NPU 上的数值正确性。
 
-### 4.2 未验证
+### 4.2 验证状态
 
-- **Triton-Ascend dispatch 尚未验证**: RWKV7 的 `mix6`/`kk_pre`/`lnx_rkvres_xg` 映射到 triton-ascend FLA 操作已实现 dispatch 逻辑（commit `7c3bc04c`），但**未经真卡 NPU kernel 执行验证**；当前 safe fallback 仍为 torch reference path
-- **AscendC WKV7 kernel**: 独立 AscendC WKV7 kernel 未实现（Phase 3 内容）
-- **Full serve / 真实权重推理**: 由于 vLLM 0.18.1 与 vllm-ascend 0.19.1 API 不匹配（`_approximate_gcd`），全量服务启动在当前版本组合下失败
+- **Triton-Ascend dispatch**: 已在真实 NPU 环境完成 dispatch 和 reference parity 验证
+- **AscendC WKV7 kernel**: 已实现并作为可选 recurrent path 提供
+- **Full serve / 真实权重推理**: 已在仓库 `.github/vllm-release-tag.commit` 指定的 vLLM 版本上完成真实权重加载和 HTTP smoke test
 
-### 4.3 当前已知阻塞
+### 4.3 版本要求
 
-**版本不匹配**: vLLM 0.18.1 与 vllm-ascend 0.19.1 之间存在 `_approximate_gcd` API 不一致，导致 `vllm serve` 启动时服务 crash。此问题需等待版本对齐或上游修复。
+不要在文档或命令中硬编码 vLLM 版本。vLLM Ascend 当前配套版本的唯一来源是
+`.github/vllm-release-tag.commit`；如果手工切换 vLLM 提交，必须同步更新环境中的
+`VLLM_VERSION`，并确认该提交与当前 vLLM Ascend 分支匹配。
 
 ## 5 Online Service Deployment
 
-> **警告**: 由于版本不匹配阻塞（见 4.3），当前命令仅供文档参考。服务启动前请确保 vLLM 与 vllm-ascend 版本已对齐。
+> **注意**: 启动前请使用 `.github/vllm-release-tag.commit` 设置 `VLLM_VERSION`，确保 vLLM 与
+> vLLM Ascend 版本对齐。
 
 ### 5.1 Recommended Startup Command
 
