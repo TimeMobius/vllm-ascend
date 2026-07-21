@@ -140,6 +140,9 @@ def _can_use_fused_recurrent(
     # Inputs must be 3D tensors (T, H, K) for single-sequence recurrent scan
     if r.ndim != 3 or w.ndim != 3 or k.ndim != 3 or v.ndim != 3 or kk.ndim != 3 or a.ndim != 3:
         return False
+    # Skip Triton for decode path (T=1) where kernel launch overhead dominates
+    if r.shape[0] < 4:
+        return False
     return True
 
 
@@ -308,7 +311,7 @@ def _can_use_alt_recurrent(
             return False
         if initial_state.dtype != torch.float32 or not initial_state.is_contiguous():
             return False
-    return hasattr(torch.ops.ascend, "npu_rwkv7_alt_recurrent")
+    return hasattr(torch.ops._C_ascend, "npu_rwkv7_alt_recurrent")
 
 
 def _can_use_direct_linear(linear, hidden_states: torch.Tensor) -> bool:
@@ -373,9 +376,9 @@ def _patch_rwkv7_recurrent_scan():
                 initial_state_npu = (
                     None
                     if initial_state is None
-                    else initial_state.transpose(-1, -2).unsqueeze(0).contiguous()
+                    else initial_state.unsqueeze(0).contiguous()
                 )
-                output, final_state = torch.ops.ascend.npu_rwkv7_alt_recurrent(
+                output, final_state = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
                     r.unsqueeze(0),
                     w.unsqueeze(0),
                     k.unsqueeze(0),
