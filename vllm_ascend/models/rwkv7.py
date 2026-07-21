@@ -784,8 +784,6 @@ class RWKV7Attention(nn.Module):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self._x_vecs_1d: tuple[torch.Tensor, ...] | None = None
-
     def _project_recurrent_inputs(
         self,
         hidden_states: torch.Tensor,
@@ -801,18 +799,12 @@ class RWKV7Attention(nn.Module):
         torch.Tensor,
         torch.Tensor,
     ]:
-        cached = self._x_vecs_1d
-        if cached is None:
-            cached = (
-                self.x_r[0, 0],
-                self.x_w[0, 0],
-                self.x_k[0, 0],
-                self.x_v[0, 0],
-                self.x_a[0, 0],
-                self.x_g[0, 0],
-            )
-            self._x_vecs_1d = cached
-        x_r, x_w, x_k, x_v, x_a, x_g = cached
+        x_r = self.x_r.squeeze(0).squeeze(0)
+        x_w = self.x_w.squeeze(0).squeeze(0)
+        x_k = self.x_k.squeeze(0).squeeze(0)
+        x_v = self.x_v.squeeze(0).squeeze(0)
+        x_a = self.x_a.squeeze(0).squeeze(0)
+        x_g = self.x_g.squeeze(0).squeeze(0)
 
         xr = hidden_states.addcmul(delta, x_r)
         xw = hidden_states.addcmul(delta, x_w)
