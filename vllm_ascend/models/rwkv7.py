@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+import re
 
 import torch
 import torch.nn.functional as F
@@ -38,12 +39,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+from vllm_ascend.ops.triton.fla import fused_recurrent_rwkv7
+from vllm_ascend import envs
 
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -54,6 +59,53 @@ from vllm.model_executor.models.utils import (
 
 LOG_DECAY_SCALE = -0.6065306597126334
 RWKV7_RUNTIME_DTYPE = torch.float32
+_NATIVE_RWKV7_BLOCK_RE = re.compile(r"blocks\.(\d+)\.(.+)")
+
+_NATIVE_RWKV7_TOP_LEVEL_NAME_MAP = {
+    "emb.weight": "model.embed_tokens.weight",
+    "ln_out.weight": "model.norm.weight",
+    "ln_out.bias": "model.norm.bias",
+    "head.weight": "lm_head.weight",
+}
+
+_NATIVE_RWKV7_BLOCK_NAME_MAP = {
+    "ln1.weight": "attn_norm.weight",
+    "ln1.bias": "attn_norm.bias",
+    "ln2.weight": "ffn_norm.weight",
+    "ln2.bias": "ffn_norm.bias",
+    "att.x_r": "attn.x_r",
+    "att.x_w": "attn.x_w",
+    "att.x_k": "attn.x_k",
+    "att.x_v": "attn.x_v",
+    "att.x_a": "attn.x_a",
+    "att.x_g": "attn.x_g",
+    "att.k_k": "attn.k_k",
+    "att.k_a": "attn.k_a",
+    "att.r_k": "attn.r_k",
+    "att.receptance.weight": "attn.r_proj.weight",
+    "att.key.weight": "attn.k_proj.weight",
+    "att.value.weight": "attn.v_proj.weight",
+    "att.output.weight": "attn.o_proj.weight",
+    "att.ln_x.weight": "attn.g_norm.weight",
+    "att.ln_x.bias": "attn.g_norm.bias",
+    "ffn.x_k": "ffn.x_k",
+    "ffn.key.weight": "ffn.key.weight",
+    "ffn.value.weight": "ffn.value.weight",
+}
+
+_NATIVE_RWKV7_LORA_SPECS = {
+    "att.w1": ("attn.w_lora.lora.0.weight", "transpose"),
+    "att.w2": ("attn.w_lora.lora.2.weight", "transpose"),
+    "att.w0": ("attn.w_lora.lora.2.bias", "squeeze"),
+    "att.a1": ("attn.a_lora.lora.0.weight", "transpose"),
+    "att.a2": ("attn.a_lora.lora.2.weight", "transpose"),
+    "att.a0": ("attn.a_lora.lora.2.bias", "squeeze"),
+    "att.g1": ("attn.g_lora.lora.0.weight", "transpose"),
+    "att.g2": ("attn.g_lora.lora.2.weight", "transpose"),
+    "att.v1": ("attn.v_lora.lora.0.weight", "transpose"),
+    "att.v2": ("attn.v_lora.lora.2.weight", "transpose"),
+    "att.v0": ("attn.v_lora.lora.2.bias", "squeeze"),
+}
 
 
 def get_tp_world_size() -> int:
@@ -76,6 +128,55 @@ def get_activation_fn(name: str):
     if name not in HF_ACT2FN:
         raise ValueError(f"Unsupported RWKV7 activation: {name}")
     return HF_ACT2FN[name]
+
+
+def _transform_native_rwkv7_tensor(
+    tensor: torch.Tensor, transform: str | None
+) -> torch.Tensor:
+    if transform == "transpose":
+        return tensor.transpose(0, 1)
+    if transform == "squeeze":
+        return tensor.reshape(-1)
+    return tensor
+
+
+def _iter_rwkv7_weight_aliases(
+    name: str, tensor: torch.Tensor
+) -> Iterable[tuple[str, torch.Tensor]]:
+    mapped_top_level_name = _NATIVE_RWKV7_TOP_LEVEL_NAME_MAP.get(name)
+    if mapped_top_level_name is not None:
+        yield mapped_top_level_name, tensor
+        return
+    if name == "model.embeddings.weight":
+        yield "model.embed_tokens.weight", tensor
+        return
+
+    match = _NATIVE_RWKV7_BLOCK_RE.fullmatch(name)
+    if match is None:
+        yield name, tensor
+        return
+
+    layer_idx = int(match.group(1))
+    suffix = match.group(2)
+    prefix = f"model.layers.{layer_idx}"
+    if suffix == "ln0.weight" and layer_idx == 0:
+        yield f"{prefix}.pre_norm.weight", tensor
+        return
+    if suffix == "ln0.bias" and layer_idx == 0:
+        yield f"{prefix}.pre_norm.bias", tensor
+        return
+
+    mapped_name = _NATIVE_RWKV7_BLOCK_NAME_MAP.get(suffix)
+    if mapped_name is not None:
+        transform = "squeeze" if suffix in {"att.k_k", "att.k_a", "ffn.x_k"} else None
+        yield f"{prefix}.{mapped_name}", _transform_native_rwkv7_tensor(tensor, transform)
+        return
+
+    lora_spec = _NATIVE_RWKV7_LORA_SPECS.get(suffix)
+    if lora_spec is None or (suffix.startswith("att.v") and layer_idx == 0):
+        return
+    mapped_name, transform = lora_spec
+    yield f"{prefix}.{mapped_name}", _transform_native_rwkv7_tensor(tensor, transform)
 
 
 def token_shift_with_cache(
@@ -224,6 +325,87 @@ def _rwkv7_recurrent_scan_varlen(
         final_states.append(seq_final_state)
 
     return torch.cat(outputs, dim=0), torch.stack(final_states, dim=0)
+
+
+def _rwkv7_cache_all_boundary_positions(
+    *,
+    num_computed_tokens: int,
+    block_idx_first_scheduled_token: int,
+    block_idx_last_scheduled_token: int,
+    block_size: int,
+    query_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if block_idx_last_scheduled_token <= block_idx_first_scheduled_token:
+        return torch.empty((0,), device=device, dtype=torch.long)
+    block_indices = torch.arange(
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        device=device,
+        dtype=torch.long,
+    )
+    positions = (block_indices + 1) * block_size - num_computed_tokens - 1
+    return positions[(positions >= 0) & (positions < query_len)]
+
+
+def _rwkv7_checkpoint_offsets_from_counts(
+    checkpoint_counts: torch.Tensor,
+) -> torch.Tensor:
+    offsets = torch.zeros(
+        checkpoint_counts.numel() + 1,
+        device=checkpoint_counts.device,
+        dtype=torch.long,
+    )
+    offsets[1:] = torch.cumsum(checkpoint_counts, dim=0)
+    return offsets
+
+
+def _rwkv7_cache_all_packed_checkpoint_metadata(
+    *,
+    prefill_query_start_loc: torch.Tensor,
+    cache_all_state_indices: torch.Tensor,
+    block_idx_first_scheduled: torch.Tensor,
+    block_idx_last_scheduled: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = prefill_query_start_loc.device
+    num_prefills = block_idx_first_scheduled.numel()
+    checkpoint_counts = torch.zeros(num_prefills, device=device, dtype=torch.long)
+    empty = torch.empty(0, device=device, dtype=torch.long)
+    if num_prefills == 0:
+        return empty, empty, checkpoint_counts, empty
+
+    seq_starts = prefill_query_start_loc[:-1].to(torch.long)
+    query_lens = prefill_query_start_loc[1:].to(torch.long) - seq_starts
+    first = block_idx_first_scheduled.to(torch.long)
+    last = block_idx_last_scheduled.to(torch.long)
+    computed = num_computed_tokens.to(torch.long)
+    block_counts = (last - first).clamp_min(0)
+    max_blocks = int(block_counts.max().item())
+    if max_blocks == 0:
+        return empty, empty, checkpoint_counts, empty
+
+    relative = torch.arange(max_blocks, device=device, dtype=torch.long)
+    scheduled = relative.unsqueeze(0) < block_counts.unsqueeze(1)
+    block_indices = first.unsqueeze(1) + relative.unsqueeze(0)
+    positions = (block_indices + 1) * block_size - computed.unsqueeze(1) - 1
+    valid = scheduled & (positions >= 0) & (positions < query_lens.unsqueeze(1))
+    checkpoint_counts = valid.sum(dim=1)
+    if int(checkpoint_counts.sum().item()) == 0:
+        return empty, empty, checkpoint_counts, empty
+
+    rows = torch.arange(num_prefills, device=device, dtype=torch.long).unsqueeze(1)
+    rows = rows.expand_as(block_indices)
+    checkpoint_positions = positions[valid]
+    absolute_positions = (positions + seq_starts.unsqueeze(1))[valid]
+    block_slot_ids = cache_all_state_indices[rows[valid], block_indices[valid]]
+    return (
+        checkpoint_positions,
+        absolute_positions,
+        checkpoint_counts,
+        block_slot_ids.to(torch.long),
+    )
 
 
 def rwkv7_attention(
@@ -440,11 +622,18 @@ class RWKV7FeedForward(nn.Module):
             prefix=f"{prefix}.value",
         )
 
+    def _mix_inputs(
+        self, hidden_states: torch.Tensor, delta: torch.Tensor
+    ) -> torch.Tensor:
+        if envs.RWKV7_USE_FUSED_CMIX and hidden_states.device.type == "npu":
+            return torch.addcmul(hidden_states, delta, self.x_k)
+        return hidden_states.addcmul(delta, self.x_k)
+
     def forward(
         self, hidden_states: torch.Tensor, cached_state: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         delta, final_state = token_shift_with_cache(hidden_states, cached_state)
-        mixed = hidden_states.addcmul(delta, self.x_k)
+        mixed = self._mix_inputs(hidden_states, delta)
         hidden, _ = self.key(mixed)
         hidden = self.act_fn(hidden)
         hidden, _ = self.value(hidden)
@@ -456,7 +645,7 @@ class RWKV7FeedForward(nn.Module):
         cached_state: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         delta = cached_state.to(hidden_states.dtype) - hidden_states
-        mixed = hidden_states.addcmul(delta, self.x_k)
+        mixed = self._mix_inputs(hidden_states, delta)
         hidden, _ = self.key(mixed)
         hidden = self.act_fn(hidden)
         hidden, _ = self.value(hidden)
@@ -473,7 +662,7 @@ class RWKV7FeedForward(nn.Module):
             query_start_loc,
             cached_state,
         )
-        mixed = hidden_states.addcmul(delta, self.x_k)
+        mixed = self._mix_inputs(hidden_states, delta)
         hidden, _ = self.key(mixed)
         hidden = self.act_fn(hidden)
         hidden, _ = self.value(hidden)
@@ -715,6 +904,103 @@ class RWKV7Attention(nn.Module):
             hidden_states.dtype,
         )
         return output, final_shift_state, final_recurrent_state, v_first_out
+
+    def forward_prefill_cache_all(
+        self,
+        hidden_states: torch.Tensor,
+        block_boundary_positions: torch.Tensor,
+        cached_shift_state: torch.Tensor | None,
+        recurrent_state: torch.Tensor | None,
+        v_first: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        delta, final_shift_state = token_shift_with_cache(
+            hidden_states, cached_shift_state
+        )
+        r, w, k, v, kk, a, g, v_first_out = self._project_recurrent_inputs(
+            hidden_states, delta, v_first
+        )
+        recurrent_output, final_recurrent_state, checkpoint_states = (
+            fused_recurrent_rwkv7(
+                r.unsqueeze(0),
+                w.unsqueeze(0),
+                k.unsqueeze(0),
+                v.unsqueeze(0),
+                kk.unsqueeze(0),
+                a.unsqueeze(0),
+                initial_state=(
+                    None
+                    if recurrent_state is None
+                    else recurrent_state.unsqueeze(0).to(torch.float32)
+                ),
+                output_final_state=True,
+                checkpoint_positions=block_boundary_positions,
+                checkpoint_offsets=block_boundary_positions.new_tensor(
+                    [0, block_boundary_positions.numel()]
+                ),
+                output_checkpoint_states=True,
+            )
+        )
+        assert final_recurrent_state is not None
+        assert checkpoint_states is not None
+        output = self._finalize_attention_output(
+            recurrent_output.squeeze(0), r, k, v, g, hidden_states.dtype
+        )
+        return (
+            output,
+            final_shift_state,
+            final_recurrent_state.squeeze(0),
+            v_first_out,
+            checkpoint_states,
+        )
+
+    def forward_prefill_batch_cache_all(
+        self,
+        hidden_states: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        checkpoint_positions: torch.Tensor,
+        checkpoint_offsets: torch.Tensor,
+        cached_shift_state: torch.Tensor | None,
+        recurrent_state: torch.Tensor | None,
+        v_first: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        delta, final_shift_state = token_shift_with_cache_varlen(
+            hidden_states, query_start_loc, cached_shift_state
+        )
+        r, w, k, v, kk, a, g, v_first_out = self._project_recurrent_inputs(
+            hidden_states, delta, v_first
+        )
+        recurrent_output, final_recurrent_state, checkpoint_states = (
+            fused_recurrent_rwkv7(
+                r.unsqueeze(0),
+                w.unsqueeze(0),
+                k.unsqueeze(0),
+                v.unsqueeze(0),
+                kk.unsqueeze(0),
+                a.unsqueeze(0),
+                initial_state=(
+                    None
+                    if recurrent_state is None
+                    else recurrent_state.to(torch.float32)
+                ),
+                output_final_state=True,
+                cu_seqlens=query_start_loc,
+                checkpoint_positions=checkpoint_positions,
+                checkpoint_offsets=checkpoint_offsets,
+                output_checkpoint_states=True,
+            )
+        )
+        assert final_recurrent_state is not None
+        assert checkpoint_states is not None
+        output = self._finalize_attention_output(
+            recurrent_output.squeeze(0), r, k, v, g, hidden_states.dtype
+        )
+        return (
+            output,
+            final_shift_state,
+            final_recurrent_state,
+            v_first_out,
+            checkpoint_states,
+        )
 
     def forward(
         self,
@@ -1118,6 +1404,131 @@ class RWKV7Block(nn.Module, MambaBase):
             ffn_shift_state,
         )
 
+    def _run_prefill_sequence_cache_all(
+        self,
+        hidden_states: torch.Tensor,
+        v_first: torch.Tensor | None,
+        num_computed_tokens: int,
+        block_idx_first_scheduled_token: int,
+        block_idx_last_scheduled_token: int,
+        state_indices_row: torch.Tensor,
+        attn_shift_state: torch.Tensor | None,
+        recurrent_state: torch.Tensor | None,
+        ffn_shift_state: torch.Tensor | None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        assert self.cache_config is not None
+        assert self.cache_config.mamba_block_size is not None
+        boundary_positions = _rwkv7_cache_all_boundary_positions(
+            num_computed_tokens=num_computed_tokens,
+            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            block_size=self.cache_config.mamba_block_size,
+            query_len=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+        residual = hidden_states
+        if self.pre_norm is not None:
+            residual = self.pre_norm(residual)
+        attn_input = self.attn_norm(residual)
+        (
+            attn_out,
+            attn_shift_state,
+            recurrent_state,
+            v_first_out,
+            checkpoint_recurrent_states,
+        ) = self.attn.forward_prefill_cache_all(
+            attn_input,
+            boundary_positions,
+            attn_shift_state,
+            recurrent_state,
+            v_first,
+        )
+        hidden_states = residual + attn_out
+        ffn_input = self.ffn_norm(hidden_states)
+        ffn_out, ffn_shift_state = self.ffn(ffn_input, ffn_shift_state)
+        hidden_states = hidden_states + ffn_out
+        block_slot_ids = state_indices_row[
+            block_idx_first_scheduled_token:block_idx_last_scheduled_token
+        ].to(torch.long)
+        return (
+            hidden_states,
+            v_first_out,
+            attn_shift_state,
+            recurrent_state,
+            ffn_shift_state,
+            block_slot_ids,
+            attn_input.index_select(0, boundary_positions),
+            checkpoint_recurrent_states,
+            ffn_input.index_select(0, boundary_positions),
+        )
+
+    def _run_prefill_batch_cache_all(
+        self,
+        hidden_states: torch.Tensor,
+        v_first: torch.Tensor | None,
+        query_start_loc: torch.Tensor,
+        checkpoint_positions: torch.Tensor,
+        checkpoint_offsets: torch.Tensor,
+        checkpoint_absolute_positions: torch.Tensor,
+        attn_shift_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        ffn_shift_state: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        residual = hidden_states
+        if self.pre_norm is not None:
+            residual = self.pre_norm(residual)
+        attn_input = self.attn_norm(residual)
+        (
+            attn_out,
+            attn_shift_state,
+            recurrent_state,
+            v_first_out,
+            checkpoint_recurrent_states,
+        ) = self.attn.forward_prefill_batch_cache_all(
+            attn_input,
+            query_start_loc,
+            checkpoint_positions,
+            checkpoint_offsets,
+            attn_shift_state,
+            recurrent_state,
+            v_first,
+        )
+        hidden_states = residual + attn_out
+        ffn_input = self.ffn_norm(hidden_states)
+        ffn_out, ffn_shift_state = self.ffn.forward_prefill_batch(
+            ffn_input, query_start_loc, ffn_shift_state
+        )
+        hidden_states = hidden_states + ffn_out
+        return (
+            hidden_states,
+            v_first_out,
+            attn_shift_state,
+            recurrent_state,
+            ffn_shift_state,
+            attn_input.index_select(0, checkpoint_absolute_positions),
+            checkpoint_recurrent_states,
+            ffn_input.index_select(0, checkpoint_absolute_positions),
+        )
+
     def _forward_runtime(
         self,
         hidden_states: torch.Tensor,
@@ -1155,11 +1566,39 @@ class RWKV7Block(nn.Module, MambaBase):
         output_slice = output[:num_actual_tokens]
         v_first_slice = v_first_out[:num_actual_tokens]
         state_indices = attn_metadata.state_indices_tensor
+        cache_all = (
+            self.cache_config is not None
+            and self.cache_config.mamba_cache_mode == "all"
+            and getattr(attn_metadata, "num_computed_tokens", None) is not None
+            and getattr(attn_metadata, "block_idx_last_computed_token", None)
+            is not None
+            and getattr(attn_metadata, "block_idx_first_scheduled_token", None)
+            is not None
+            and getattr(attn_metadata, "block_idx_last_scheduled_token", None)
+            is not None
+        )
 
         if attn_metadata.num_decode_tokens > 0:
-            decode_slot_ids = state_indices[: attn_metadata.num_decodes].to(
-                dtype=torch.long
-            )
+            if cache_all:
+                decode_slot_ids = state_indices[: attn_metadata.num_decodes].gather(
+                    1,
+                    attn_metadata.block_idx_last_computed_token[
+                        : attn_metadata.num_decodes
+                    ].unsqueeze(1),
+                ).squeeze(1).to(torch.long)
+                decode_output_slot_ids = state_indices[
+                    : attn_metadata.num_decodes
+                ].gather(
+                    1,
+                    attn_metadata.block_idx_last_scheduled_token[
+                        : attn_metadata.num_decodes
+                    ].unsqueeze(1),
+                ).squeeze(1).to(torch.long)
+            else:
+                decode_slot_ids = state_indices[: attn_metadata.num_decodes].to(
+                    dtype=torch.long
+                )
+                decode_output_slot_ids = decode_slot_ids
             states = self._get_kv_states(decode_slot_ids)
             out, vf_out, attn_shift, recurrent, ffn_shift = self._run_decode_batch(
                 hidden_states[: attn_metadata.num_decode_tokens],
@@ -1169,7 +1608,7 @@ class RWKV7Block(nn.Module, MambaBase):
             output_slice[: attn_metadata.num_decode_tokens] = out
             v_first_slice[: attn_metadata.num_decode_tokens] = vf_out
             self._store_kv_states(
-                decode_slot_ids,
+                decode_output_slot_ids,
                 attn_shift,
                 recurrent,
                 ffn_shift,
@@ -1179,6 +1618,83 @@ class RWKV7Block(nn.Module, MambaBase):
         prefill_token_offset = attn_metadata.num_decode_tokens
         if attn_metadata.num_prefills > 0:
             prefill_req_end = prefill_req_offset + attn_metadata.num_prefills
+            if cache_all:
+                prefill_query_start_loc = (
+                    attn_metadata.query_start_loc[
+                        prefill_req_offset : prefill_req_end + 1
+                    ]
+                    - prefill_token_offset
+                )
+                cache_all_state_indices = state_indices[
+                    prefill_req_offset:prefill_req_end
+                ]
+                block_idx_last_computed = attn_metadata.block_idx_last_computed_token[
+                    prefill_req_offset:prefill_req_end
+                ]
+                block_idx_first_scheduled = attn_metadata.block_idx_first_scheduled_token[
+                    prefill_req_offset:prefill_req_end
+                ]
+                block_idx_last_scheduled = attn_metadata.block_idx_last_scheduled_token[
+                    prefill_req_offset:prefill_req_end
+                ]
+                num_computed_tokens = attn_metadata.num_computed_tokens[
+                    prefill_req_offset:prefill_req_end
+                ]
+                input_slot_ids = cache_all_state_indices.gather(
+                    1, block_idx_last_computed.unsqueeze(1)
+                ).squeeze(1).to(torch.long)
+                output_slot_ids = cache_all_state_indices.gather(
+                    1, block_idx_last_scheduled.unsqueeze(1)
+                ).squeeze(1).to(torch.long)
+                has_initial_state = num_computed_tokens > 0
+                (
+                    checkpoint_positions,
+                    checkpoint_absolute_positions,
+                    checkpoint_counts,
+                    block_slot_ids,
+                ) = _rwkv7_cache_all_packed_checkpoint_metadata(
+                    prefill_query_start_loc=prefill_query_start_loc,
+                    cache_all_state_indices=cache_all_state_indices,
+                    block_idx_first_scheduled=block_idx_first_scheduled,
+                    block_idx_last_scheduled=block_idx_last_scheduled,
+                    num_computed_tokens=num_computed_tokens,
+                    block_size=self.cache_config.mamba_block_size,
+                )
+                checkpoint_offsets = _rwkv7_checkpoint_offsets_from_counts(
+                    checkpoint_counts
+                )
+                states = self._get_prefill_kv_states(
+                    input_slot_ids, has_initial_state
+                )
+                (
+                    out,
+                    vf_out,
+                    attn_shift,
+                    recurrent,
+                    ffn_shift,
+                    block_attn_shift_states,
+                    checkpoint_recurrent_states,
+                    block_ffn_shift_states,
+                ) = self._run_prefill_batch_cache_all(
+                    hidden_states[prefill_token_offset:num_actual_tokens],
+                    None
+                    if v_first is None
+                    else v_first[prefill_token_offset:num_actual_tokens],
+                    prefill_query_start_loc,
+                    checkpoint_positions,
+                    checkpoint_offsets,
+                    checkpoint_absolute_positions,
+                    *states,
+                )
+                output_slice[prefill_token_offset:num_actual_tokens] = out
+                v_first_slice[prefill_token_offset:num_actual_tokens] = vf_out
+                self._store_kv_states(
+                    torch.cat((block_slot_ids, output_slot_ids)),
+                    torch.cat((block_attn_shift_states, attn_shift)),
+                    torch.cat((checkpoint_recurrent_states, recurrent)),
+                    torch.cat((block_ffn_shift_states, ffn_shift)),
+                )
+                return
             prefill_slot_ids = state_indices[prefill_req_offset:prefill_req_end].to(
                 dtype=torch.long
             )
@@ -1390,6 +1906,7 @@ class RWKV7ForCausalLM(
     HasInnerState,
     IsAttentionFree,
     SupportsPP,
+    SupportsMambaPrefixCaching,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -1482,10 +1999,7 @@ class RWKV7ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def iter_weights():
             for name, tensor in weights:
-                if name == "model.embeddings.weight":
-                    yield "model.embed_tokens.weight", tensor
-                else:
-                    yield name, tensor
+                yield from _iter_rwkv7_weight_aliases(name, tensor)
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(iter_weights())
