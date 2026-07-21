@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
+from inspect import signature
 from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
@@ -290,7 +291,9 @@ def get_manager_for_kv_cache_spec(
         # at cc>=2 on DSv4 (see vLLM issue #40863).
         token_budget = max_num_batched_tokens if vllm_version_is("0.25.1") else max_in_flight_tokens
         if token_budget is not None and max_model_len is not None:
-            if vllm_version_is("0.25.1"):
+            if "max_num_batched_tokens" in signature(
+                kv_cache_spec.max_admission_blocks_per_request
+            ).parameters:
                 kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
                     max_num_batched_tokens=token_budget,
                     max_model_len=max_model_len,

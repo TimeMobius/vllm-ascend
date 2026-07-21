@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
 from collections.abc import Mapping
+from inspect import signature
 from math import lcm
 
 import vllm
@@ -510,7 +511,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
-        if vllm_version_is("0.25.1"):
+        if "max_num_batched_tokens" in signature(_orig_get_kv_cache_coordinator).parameters:
             orig_kwargs["max_num_batched_tokens"] = token_budget
         else:
             orig_kwargs["max_in_flight_tokens"] = token_budget

@@ -26,6 +26,7 @@ import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -580,14 +581,34 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+_VLLM_RELEASE_TAG_FILE = Path(__file__).resolve().parents[1] / ".github/vllm-release-tag.commit"
+
+
+@functools.cache
+def get_vllm_release_tag() -> str | None:
+    try:
+        release_tag = _VLLM_RELEASE_TAG_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    try:
+        Version(release_tag)
+    except InvalidVersion as exc:
+        raise ValueError(
+            f"Invalid vLLM release tag {release_tag!r} in {_VLLM_RELEASE_TAG_FILE}"
+        ) from exc
+    return release_tag
+
+
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
         vllm_version = envs_ascend.VLLM_VERSION
     else:
-        import vllm
+        vllm_version = get_vllm_release_tag()
+        if vllm_version is None:
+            import vllm
 
-        vllm_version = vllm.__version__
+            vllm_version = vllm.__version__
     try:
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
