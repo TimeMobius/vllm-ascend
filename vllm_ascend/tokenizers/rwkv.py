@@ -147,7 +147,16 @@ class RWKVTokenizer(TokenizerLike):
         add_special_tokens: bool = True,
     ) -> list[int]:
         del add_special_tokens
-        parts = self._special_pattern.split(text) if self._special_pattern else [text]
+        parts: list[str] = []
+        if self._special_pattern is None:
+            parts.append(text)
+        else:
+            last_end = 0
+            for match in self._special_pattern.finditer(text):
+                parts.append(text[last_end : match.start()])
+                parts.append(match.group(0))
+                last_end = match.end()
+            parts.append(text[last_end:])
         result: list[int] = []
         for part in parts:
             if part in self._special_tokens:
