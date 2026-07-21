@@ -15,9 +15,11 @@ import unittest
 import torch
 
 try:
-    from vllm.ascend import ascend_backend
+    import vllm_ascend.utils
+    vllm_ascend.utils.enable_custom_op()
+    _has_custom_op = True
 except ImportError:
-    ascend_backend = None  # Will cause setUpClass to skip tests
+    _has_custom_op = False
 
 
 class TestRWKV7AltRecurrentParity(unittest.TestCase):
@@ -25,11 +27,12 @@ class TestRWKV7AltRecurrentParity(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if ascend_backend is None:
-            raise unittest.SkipTest("vllm.ascend not available, skipping RWKV7 alt recurrent tests")
+        if not _has_custom_op:
+            raise unittest.SkipTest("custom op not available, skipping RWKV7 alt recurrent tests")
         if not torch.npu.is_available():
             raise unittest.SkipTest("NPU not available, skipping RWKV7 alt recurrent tests")
-        ascend_backend.initialize()
+        if not hasattr(torch.ops._C_ascend, "npu_rwkv7_alt_recurrent"):
+            raise unittest.SkipTest("npu_rwkv7_alt_recurrent not found in torch.ops._C_ascend")
 
     def test_head_dim_64_single_token(self):
         B, H = 1, 2
@@ -40,7 +43,7 @@ class TestRWKV7AltRecurrentParity(unittest.TestCase):
         kk = torch.randn(B, 1, H, 64, device='npu', dtype=torch.float32)
         a = torch.randn(B, 1, H, 64, device='npu', dtype=torch.float32)
 
-        out, final_state = torch.ops.ascend.npu_rwkv7_alt_recurrent(
+        out, final_state = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
             r, w, k, v, kk, a, None
         )
 
@@ -58,7 +61,7 @@ class TestRWKV7AltRecurrentParity(unittest.TestCase):
         kk = torch.randn(B, T, H, 64, device='npu', dtype=torch.float32)
         a = torch.randn(B, T, H, 64, device='npu', dtype=torch.float32)
 
-        out, final_state = torch.ops.ascend.npu_rwkv7_alt_recurrent(
+        out, final_state = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
             r, w, k, v, kk, a, None
         )
 
