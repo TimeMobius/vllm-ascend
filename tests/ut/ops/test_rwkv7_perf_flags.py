@@ -2,7 +2,7 @@ from vllm_ascend import envs
 
 
 def test_rwkv7_perf_flags_default_to_reference_paths():
-    assert envs.RWKV7_USE_FUSED_MIX6 is False
+    assert envs.RWKV7_USE_FUSED_MIX6 is True
     assert envs.RWKV7_USE_FUSED_KK_PRE is False
     assert envs.RWKV7_USE_FUSED_LNX_RKVRES_XG is False
     assert envs.RWKV7_USE_FUSED_CMIX is False

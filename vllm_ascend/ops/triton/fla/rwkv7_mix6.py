@@ -199,7 +199,7 @@ def rwkv7_mix6(
 
     numel = hidden_states.numel()
     hidden_size = hidden_states.shape[-1]
-    output_dtype = torch.result_type(hidden_states, x_r)
+    output_dtype = hidden_states.dtype
     xr = torch.empty_like(hidden_states, dtype=output_dtype)
     xw = torch.empty_like(hidden_states, dtype=output_dtype)
     xk = torch.empty_like(hidden_states, dtype=output_dtype)
