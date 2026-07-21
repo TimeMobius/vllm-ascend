@@ -115,7 +115,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # RWKV7 performance controls. Each switch defaults to the reference path;
     # enable one operator at a time when validating an NPU kernel.
     "RWKV7_USE_FUSED_MIX6": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_MIX6", "0"))),
-    "RWKV7_USE_FUSED_KK_PRE": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_KK_PRE", "0"))),
+    "RWKV7_USE_FUSED_KK_PRE": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_KK_PRE", "1"))),
     "RWKV7_USE_FUSED_LNX_RKVRES_XG": lambda: bool(
         int(os.getenv("RWKV7_USE_FUSED_LNX_RKVRES_XG", "0"))
     ),
