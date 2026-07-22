@@ -1074,15 +1074,30 @@ class RWKV7Attention(nn.Module):
         )
         # recurrent_state is allocated as float32 by get_state_dtype;
         # skip the redundant .to() call to avoid dispatch overhead.
-        final_recurrent_state = _rwkv7_recurrent_step(
-            recurrent_state,
-            w,
-            kk,
-            a,
-            k,
-            v,
-        )
-        recurrent_output = (final_recurrent_state * r.unsqueeze(-1)).sum(dim=-2)
+        if envs.RWKV7_USE_FUSED_RECURRENT_T1:
+            from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
+                rwkv7_recurrent_t1,
+            )
+
+            final_recurrent_state, recurrent_output = rwkv7_recurrent_t1(
+                recurrent_state,
+                w,
+                kk,
+                a,
+                k,
+                v,
+                r,
+            )
+        else:
+            final_recurrent_state = _rwkv7_recurrent_step(
+                recurrent_state,
+                w,
+                kk,
+                a,
+                k,
+                v,
+            )
+            recurrent_output = (final_recurrent_state * r.unsqueeze(-1)).sum(dim=-2)
 
         output = self._finalize_attention_output(
             recurrent_output,

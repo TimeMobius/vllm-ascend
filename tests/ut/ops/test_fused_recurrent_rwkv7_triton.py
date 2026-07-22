@@ -238,3 +238,44 @@ class TestFusedRecurrentRWKV7DevicePlacement(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TestRWKV7RecurrentT1(unittest.TestCase):
+    """CPU reference fallback test for rwkv7_recurrent_t1 fused kernel."""
+
+    def test_reference_cpu_fp32(self):
+        from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
+            _rwkv7_recurrent_t1_reference, rwkv7_recurrent_t1,
+        )
+        H, D, V = 4, 16, 32
+        state = torch.randn(H, D, V, dtype=torch.float32)
+        w = torch.randn(H, D, dtype=torch.float32)
+        kk = torch.randn(H, D, dtype=torch.float32)
+        a = torch.randn(H, D, dtype=torch.float32)
+        k = torch.randn(H, D, dtype=torch.float32)
+        v = torch.randn(H, V, dtype=torch.float32)
+        r = torch.randn(H, V, dtype=torch.float32)
+
+        ref_state, ref_out = _rwkv7_recurrent_t1_reference(state, w, kk, a, k, v, r)
+        got_state, got_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)
+
+        torch.testing.assert_close(got_state, ref_state, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(got_out, ref_out, atol=1e-5, rtol=1e-5)
+
+    def test_reference_cpu_bf16_input_cast(self):
+        """Mixed bf16 input triggers fallback (guard: fp32 only)."""
+        from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
+            rwkv7_recurrent_t1,
+        )
+        H, D, V = 4, 16, 32
+        state = torch.randn(H, D, V, dtype=torch.bfloat16)
+        w = torch.randn(H, D, dtype=torch.bfloat16)
+        kk = torch.randn(H, D, dtype=torch.bfloat16)
+        a = torch.randn(H, D, dtype=torch.bfloat16)
+        k = torch.randn(H, D, dtype=torch.bfloat16)
+        v = torch.randn(H, V, dtype=torch.bfloat16)
+        r = torch.randn(H, V, dtype=torch.bfloat16)
+
+        # Must not crash (falls back to fp32 ref via guard)
+        new_state, reduce_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)
+        self.assertTrue(torch.isfinite(new_state).all())
+        self.assertTrue(torch.isfinite(reduce_out).all())

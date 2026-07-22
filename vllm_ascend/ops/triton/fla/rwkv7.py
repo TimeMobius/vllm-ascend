@@ -15,6 +15,10 @@ from vllm_ascend.ops.triton.fla.rwkv7_mix6 import (
     rwkv7_mix6,
     rwkv7_mix6_reference,
 )
+from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
+    rwkv7_recurrent_t1,
+    _rwkv7_recurrent_t1_reference,
+)
 
 
 def fused_mul_recurrent_rwkv7(*args, **kwargs):
@@ -32,4 +36,6 @@ __all__ = [
     "rwkv7_kk_pre_reference",
     "rwkv7_mix6",
     "rwkv7_mix6_reference",
+    "rwkv7_recurrent_t1",
+    "_rwkv7_recurrent_t1_reference",
 ]

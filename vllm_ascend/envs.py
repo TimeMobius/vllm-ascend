@@ -126,6 +126,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "RWKV7_USE_ALT_RECURRENT_KERNEL": lambda: bool(
         int(os.getenv("RWKV7_USE_ALT_RECURRENT_KERNEL", "1"))
     ),
+    # RWKV7 single-token T=1 fused recurrent step + reduce. Combines the
+    # recurrent state update with the trailing (state * r).sum(-2) into one
+    # Triton kernel. Targets the decode hot path (61 calls per request).
+    "RWKV7_USE_FUSED_RECURRENT_T1": lambda: bool(
+        int(os.getenv("RWKV7_USE_FUSED_RECURRENT_T1", "0"))
+    ),
     "RWKV7_DISABLE_FUSED_PREFILL": lambda: bool(
         int(os.getenv("RWKV7_DISABLE_FUSED_PREFILL", "0"))
     ),
