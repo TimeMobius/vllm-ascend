@@ -1,0 +1,11 @@
+{
+  "branch": "fix/rwkv7-vllm024-api-compat",
+  "scenario": "long_v5_optimized",
+  "warmup_requests": 0,
+  "measured_requests": 1,
+  "max_tokens": 1024,
+  "completion_tokens": 1024,
+  "elapsed_s": 282.6363341808319,
+  "throughput_tokens_per_second": 3.623030290736932,
+  "optimization": "epilogue_default+float32_cache+T<4_guard+alt_recurrent_namespace_fix"
+}

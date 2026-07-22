@@ -1,0 +1,12 @@
+{
+  "branch": "fix/rwkv7-vllm024-api-compat",
+  "scenario": "long_epilogue_default",
+  "warmup_requests": 0,
+  "measured_requests": 1,
+  "max_tokens": 1024,
+  "completion_tokens": 1024,
+  "elapsed_s": 308.90008759498596,
+  "throughput_tokens_per_second": 3.314987729438965,
+  "prompt": "Write a detailed analytical report...",
+  "optimization": "epilogue_enabled_by_default"
+}

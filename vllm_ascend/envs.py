@@ -124,7 +124,7 @@ env_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("RWKV7_USE_DIRECT_LINEAR", "0"))
     ),
     "RWKV7_USE_ALT_RECURRENT_KERNEL": lambda: bool(
-        int(os.getenv("RWKV7_USE_ALT_RECURRENT_KERNEL", "0"))
+        int(os.getenv("RWKV7_USE_ALT_RECURRENT_KERNEL", "1"))
     ),
     "RWKV7_DISABLE_FUSED_PREFILL": lambda: bool(
         int(os.getenv("RWKV7_DISABLE_FUSED_PREFILL", "0"))

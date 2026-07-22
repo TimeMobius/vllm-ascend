@@ -1,0 +1,10 @@
+{
+  "branch": "fix/rwkv7-vllm024-api-compat",
+  "scenario": "long_mix6_only",
+  "warmup_requests": 0,
+  "measured_requests": 1,
+  "max_tokens": 1024,
+  "completion_tokens": 1024,
+  "elapsed_s": 318.37438472919166,
+  "throughput_tokens_per_second": 3.2163391564023325
+}

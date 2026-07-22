@@ -1,0 +1,41 @@
+{
+  "branch": "fix/rwkv7-vllm024-api-compat",
+  "model": "/hikscale/models/RWKV/rwkv-step-12250-bf16-hf",
+  "warmup_requests": 5,
+  "measured_requests": 10,
+  "request": {
+    "model": "/hikscale/models/RWKV/rwkv-step-12250-bf16-hf",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain why recurrent language models can process long sequences efficiently."
+      }
+    ],
+    "max_tokens": 16,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "stream": false
+  },
+  "aggregate": {
+    "total_elapsed_s": 48.87704075407237,
+    "completion_tokens": 160,
+    "throughput_tokens_per_second": 3.273520604593252
+  },
+  "latency_ms": {
+    "mean": 4887.617039773613,
+    "median": 4890.830933116376,
+    "p95": 4939.113144762814,
+    "samples": [
+      4939.113144762814,
+      4910.207419656217,
+      4927.616850472987,
+      4859.478889033198,
+      4890.843143686652,
+      4907.746530137956,
+      4890.818722546101,
+      4857.403411529958,
+      4819.900837726891,
+      4873.041448183358
+    ]
+  }
+}
