@@ -132,6 +132,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "RWKV7_USE_FUSED_RECURRENT_T1": lambda: bool(
         int(os.getenv("RWKV7_USE_FUSED_RECURRENT_T1", "0"))
     ),
+    # RWKV7 fused block norms: combines attn_norm(residual) and
+    # ffn_norm(hidden + attn_out) into one Triton launch. Targets the
+    # T=1 decode path (122 LayerNorm launches saved per request).
+    "RWKV7_USE_FUSED_BLOCK_NORMS": lambda: bool(
+        int(os.getenv("RWKV7_USE_FUSED_BLOCK_NORMS", "0"))
+    ),
     "RWKV7_DISABLE_FUSED_PREFILL": lambda: bool(
         int(os.getenv("RWKV7_DISABLE_FUSED_PREFILL", "0"))
     ),

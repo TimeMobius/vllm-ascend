@@ -279,3 +279,26 @@ class TestRWKV7RecurrentT1(unittest.TestCase):
         new_state, reduce_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)
         self.assertTrue(torch.isfinite(new_state).all())
         self.assertTrue(torch.isfinite(reduce_out).all())
+
+
+class TestRWKV7BlockNorms(unittest.TestCase):
+    """CPU reference fallback test for rwkv7_block_norms fused kernel."""
+
+    def test_reference_cpu(self):
+        from vllm_ascend.ops.triton.fla.rwkv7_block_norms import (
+            _rwkv7_block_norms_reference, rwkv7_block_norms,
+        )
+        H = 4096
+        residual = torch.randn(1, H, dtype=torch.float32)
+        hidden = torch.randn(1, H, dtype=torch.float32)
+        w1 = torch.randn(H, dtype=torch.float32)
+        b1 = torch.randn(H, dtype=torch.float32)
+        w2 = torch.randn(H, dtype=torch.float32)
+        b2 = torch.randn(H, dtype=torch.float32)
+        eps = 1e-5
+
+        ref_a, ref_f = _rwkv7_block_norms_reference(residual, hidden, w1, b1, w2, b2, eps)
+        got_a, got_f = rwkv7_block_norms(residual, hidden, w1, b1, w2, b2, eps)
+
+        torch.testing.assert_close(got_a, ref_a, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(got_f, ref_f, atol=1e-4, rtol=1e-4)

@@ -1363,18 +1363,51 @@ class RWKV7Block(nn.Module, MambaBase):
         if self.pre_norm is not None:
             residual = self.pre_norm(residual)
 
-        attn_input = self.attn_norm(residual)
-        attn_out, attn_shift_state, recurrent_state, v_first_out = (
-            self.attn.forward_decode_batch(
-                attn_input,
-                attn_shift_state,
-                recurrent_state,
-                v_first,
+        if envs.RWKV7_USE_FUSED_BLOCK_NORMS:
+            from vllm_ascend.ops.triton.fla.rwkv7_block_norms import (
+                rwkv7_block_norms,
             )
-        )
-        hidden_states = residual + attn_out
 
-        ffn_input = self.ffn_norm(hidden_states)
+            attn_input, _ = rwkv7_block_norms(
+                residual,
+                hidden_states,
+                self.attn_norm.weight,
+                self.attn_norm.bias,
+                self.ffn_norm.weight,
+                self.ffn_norm.bias,
+                self.attn_norm.eps,
+            )
+            attn_out, attn_shift_state, recurrent_state, v_first_out = (
+                self.attn.forward_decode_batch(
+                    attn_input,
+                    attn_shift_state,
+                    recurrent_state,
+                    v_first,
+                )
+            )
+            hidden_states = residual + attn_out
+            _, ffn_input = rwkv7_block_norms(
+                residual,
+                hidden_states,
+                self.attn_norm.weight,
+                self.attn_norm.bias,
+                self.ffn_norm.weight,
+                self.ffn_norm.bias,
+                self.attn_norm.eps,
+            )
+        else:
+            attn_input = self.attn_norm(residual)
+            attn_out, attn_shift_state, recurrent_state, v_first_out = (
+                self.attn.forward_decode_batch(
+                    attn_input,
+                    attn_shift_state,
+                    recurrent_state,
+                    v_first,
+                )
+            )
+            hidden_states = residual + attn_out
+
+            ffn_input = self.ffn_norm(hidden_states)
         ffn_out, ffn_shift_state = self.ffn.forward_decode_batch(
             ffn_input, ffn_shift_state
         )
