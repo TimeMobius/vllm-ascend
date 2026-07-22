@@ -467,5 +467,132 @@ class TestRWKV7PatchDoesNotModifyUpstream(unittest.TestCase):
         self.assertTrue(callable(getattr(ops_module, "rwkv7_kk_pre", None)))
 
 
+class TestRWKV7FinalizeLocalRKCache(unittest.TestCase):
+    """Verify _ascend_r_k_fp32_local cache in _finalize_attention_output.
+
+    Opt-C: cache local_r_k as fp32 to avoid per-call slice+cast on constant
+    model param. Eliminates 1 slice + 1 dtype cast per decode step per layer
+    (= 61 saves per request). Same pattern as epilogue patch's
+    _ascend_r_k_fp32.
+    """
+
+    def _make_attention(self):
+        """Build a minimal RWKV7Attention-like object for _finalize testing."""
+        from types import SimpleNamespace
+
+        attn = SimpleNamespace()
+
+        # Model-like constants (RWKV7 sizes from step-12250)
+        num_heads = 64
+        head_dim = 64
+        head_v_dim = 64
+        local_num_heads = num_heads
+        local_value_dim = num_heads * head_v_dim
+
+        # r_k is the constant model param; [num_heads, head_dim] bf16
+        attn.r_k = torch.randn(num_heads, head_dim, dtype=torch.bfloat16)
+        attn.tp_rank = 0
+        attn.local_num_heads = local_num_heads
+        attn.local_value_dim = local_value_dim
+
+        # Stub g_norm to mimic F.group_norm without real weights
+        class FakeGroupNorm:
+            def __call__(self, x):
+                return x
+
+        attn.g_norm = FakeGroupNorm()
+
+        # Stub o_proj to return identity
+        class FakeOProj:
+            def __call__(self, x):
+                return x, None
+
+        attn.o_proj = FakeOProj()
+
+        return attn
+
+    def test_cache_attribute_set_after_first_call(self):
+        """Cache attribute is created on first call and reused on second call."""
+        attn = self._make_attention()
+
+        # Import the method (bound to the stub object)
+        from vllm_ascend.models.rwkv7 import RWKV7Attention
+
+        # Bind the unbound method to our stub via monkey-patch style
+        def finalize(self, recurrent_output, r, k, v, g, hidden_dtype):
+            return RWKV7Attention._finalize_attention_output(
+                self, recurrent_output, r, k, v, g, hidden_dtype
+            )
+
+        import types
+
+        attn._finalize_attention_output = types.MethodType(
+            finalize, attn
+        )
+
+        # Construct fake inputs
+        recurrent_output = torch.randn(
+            1, attn.local_num_heads, head_dim := 64, dtype=torch.float32
+        )
+        r = torch.randn(1, attn.local_num_heads, head_dim, dtype=torch.float32)
+        k = torch.randn_like(r)
+        v = torch.randn(
+            1, attn.local_num_heads, 64, dtype=torch.float32
+        )
+        g = torch.randn(1, attn.local_value_dim, dtype=torch.bfloat16)
+
+        attn._finalize_attention_output(
+            recurrent_output, r, k, v, g, torch.bfloat16
+        )
+        # Cache attribute must now be set
+        self.assertTrue(hasattr(attn, "_ascend_r_k_fp32_local"))
+        cached = attn._ascend_r_k_fp32_local
+        self.assertEqual(cached.dtype, torch.float32)
+        self.assertEqual(
+            cached.shape, (attn.local_num_heads, head_dim)
+        )
+
+        # Second call: cache must be reused (same object identity)
+        attn._finalize_attention_output(
+            recurrent_output, r, k, v, g, torch.bfloat16
+        )
+        self.assertIs(attn._ascend_r_k_fp32_local, cached)
+
+    def test_cache_value_matches_manual_slice(self):
+        """Cached value must equal the original slice+cast computation."""
+        attn = self._make_attention()
+        expected = attn.r_k[
+            attn.tp_rank
+            * attn.local_num_heads : (attn.tp_rank + 1)
+            * attn.local_num_heads
+        ].to(torch.float32)
+
+        from vllm_ascend.models.rwkv7 import RWKV7Attention
+        import types
+
+        def finalize(self, recurrent_output, r, k, v, g, hidden_dtype):
+            return RWKV7Attention._finalize_attention_output(
+                self, recurrent_output, r, k, v, g, hidden_dtype
+            )
+
+        attn._finalize_attention_output = types.MethodType(
+            finalize, attn
+        )
+        recurrent_output = torch.randn(
+            1, attn.local_num_heads, 64, dtype=torch.float32
+        )
+        r = torch.randn(1, attn.local_num_heads, 64, dtype=torch.float32)
+        k = torch.randn_like(r)
+        v = torch.randn(1, attn.local_num_heads, 64, dtype=torch.float32)
+        g = torch.randn(1, attn.local_value_dim, dtype=torch.bfloat16)
+        attn._finalize_attention_output(
+            recurrent_output, r, k, v, g, torch.bfloat16
+        )
+
+        cached = attn._ascend_r_k_fp32_local
+        self.assertTrue(torch.allclose(cached, expected))
+        self.assertEqual(cached.data_ptr(), expected.data_ptr())
+
+
 if __name__ == "__main__":
     unittest.main()

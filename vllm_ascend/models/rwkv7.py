@@ -857,10 +857,17 @@ class RWKV7Attention(nn.Module):
         output = recurrent_output.reshape(-1, self.local_value_dim)
         output = self.g_norm(output)
 
-        local_r_k = self.r_k[
-            self.tp_rank * self.local_num_heads : (self.tp_rank + 1)
-            * self.local_num_heads
-        ].to(torch.float32)
+        # Cache local_r_k as fp32 to avoid per-call slice+cast on constant
+        # model param. Lazy init on first call (same pattern as epilogue
+        # patch's _ascend_r_k_fp32, but suffixed with _local to avoid
+        # collision).
+        local_r_k = getattr(self, "_ascend_r_k_fp32_local", None)
+        if local_r_k is None:
+            local_r_k = self.r_k[
+                self.tp_rank * self.local_num_heads : (self.tp_rank + 1)
+                * self.local_num_heads
+            ].to(torch.float32)
+            self._ascend_r_k_fp32_local = local_r_k
         correction = (
             (r * k * local_r_k.unsqueeze(0)).sum(dim=-1, keepdim=True) * v
         ).reshape(-1, self.local_value_dim)
