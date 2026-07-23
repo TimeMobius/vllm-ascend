@@ -129,7 +129,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # RWKV7 single-token T=1 decode path: route through AscendC
     # npu_rwkv7_alt_recurrent kernel instead of PyTorch ref.
     "RWKV7_USE_ALT_RECURRENT_DECODE": lambda: bool(
-        int(os.getenv("RWKV7_USE_ALT_RECURRENT_DECODE", "0"))
+        int(os.getenv("RWKV7_USE_ALT_RECURRENT_DECODE", "1"))
     ),
     # RWKV7 single-token T=1 fused recurrent step + reduce. Combines the
     # recurrent state update with the trailing (state * r).sum(-2) into one
