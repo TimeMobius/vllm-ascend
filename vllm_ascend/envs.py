@@ -126,6 +126,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "RWKV7_USE_ALT_RECURRENT_KERNEL": lambda: bool(
         int(os.getenv("RWKV7_USE_ALT_RECURRENT_KERNEL", "1"))
     ),
+    # RWKV7 single-token T=1 decode path: route through AscendC
+    # npu_rwkv7_alt_recurrent kernel instead of PyTorch ref.
+    "RWKV7_USE_ALT_RECURRENT_DECODE": lambda: bool(
+        int(os.getenv("RWKV7_USE_ALT_RECURRENT_DECODE", "0"))
+    ),
     # RWKV7 single-token T=1 fused recurrent step + reduce. Combines the
     # recurrent state update with the trailing (state * r).sum(-2) into one
     # Triton kernel. Targets the decode hot path (61 calls per request).

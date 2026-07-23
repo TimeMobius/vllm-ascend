@@ -1074,6 +1074,28 @@ class RWKV7Attention(nn.Module):
         )
         # recurrent_state is allocated as float32 by get_state_dtype;
         # skip the redundant .to() call to avoid dispatch overhead.
+
+        def _can_use_alt_recurrent_decode(
+            recurrent_state: torch.Tensor,
+            w: torch.Tensor,
+            kk: torch.Tensor,
+            a: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+        ) -> bool:
+            if not torch.npu.is_available():
+                return False
+            if recurrent_state.device.type != "npu":
+                return False
+            if w.shape[-1] != 64 or k.shape[-1] != 64 or v.shape[-1] != 64:
+                return False
+            if recurrent_state.shape[-2] != 64 or recurrent_state.shape[-1] != 64:
+                return False
+            tensors = (recurrent_state, w, kk, a, k, v)
+            if not all(t.dtype == torch.float32 and t.is_contiguous() for t in tensors):
+                return False
+            return hasattr(torch.ops._C_ascend, "npu_rwkv7_alt_recurrent")
+
         if envs.RWKV7_USE_FUSED_RECURRENT_T1:
             from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
                 rwkv7_recurrent_t1,
@@ -1088,6 +1110,20 @@ class RWKV7Attention(nn.Module):
                 v,
                 r,
             )
+        elif envs.RWKV7_USE_ALT_RECURRENT_DECODE and _can_use_alt_recurrent_decode(
+                recurrent_state, w, kk, a, k, v,
+            ):
+                out_4d, state_4d = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
+                    r.unsqueeze(1),
+                    w.unsqueeze(1),
+                    k.unsqueeze(1),
+                    v.unsqueeze(1),
+                    kk.unsqueeze(1),
+                    a.unsqueeze(1),
+                    recurrent_state,
+                )
+                recurrent_output = out_4d.squeeze(1)  # [B, H, 64]
+                final_recurrent_state = state_4d  # [B, H, 64, 64]
         else:
             final_recurrent_state = _rwkv7_recurrent_step(
                 recurrent_state,
