@@ -109,7 +109,10 @@ class RWKVTokenizer(TokenizerLike):
             if not isinstance(values, list):
                 values = [values]
             for token in values:
-                if not isinstance(token, str) or token in self._bytes_to_id:
+                if not isinstance(token, str):
+                    continue
+                token_bytes = token.encode("latin-1")
+                if token_bytes in self._bytes_to_id:
                     continue
                 self._special_tokens[token] = next_id
                 next_id += 1

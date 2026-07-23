@@ -19,43 +19,114 @@ class RWKVReasoningParser(ReasoningParser):
         self.end_token_ids = tokenizer.encode(self.end_token, add_special_tokens=False)
 
     @staticmethod
-    def _find(values: Sequence[int], pattern: Sequence[int]) -> int:
+    def _find_subsequence(values: Sequence[int], pattern: Sequence[int]) -> int:
         width = len(pattern)
-        return next(
-            (index for index in range(len(values) - width + 1) if list(values[index : index + width]) == list(pattern)),
-            -1,
-        ) if width else -1
+        if not pattern or width > len(values):
+            return -1
+        last_start = len(values) - width
+        for start in range(last_start + 1):
+            if list(values[start : start + width]) == list(pattern):
+                return start
+        return -1
+
+    _find = _find_subsequence
 
     @classmethod
-    def _rfind(cls, values: Sequence[int], pattern: Sequence[int]) -> int:
+    def _rfind_subsequence(cls, values: Sequence[int], pattern: Sequence[int]) -> int:
         width = len(pattern)
-        return next(
-            (index for index in range(len(values) - width, -1, -1) if list(values[index : index + width]) == list(pattern)),
-            -1,
-        ) if width else -1
+        if not pattern or width > len(values):
+            return -1
+        for start in range(len(values) - width, -1, -1):
+            if list(values[start : start + width]) == list(pattern):
+                return start
+        return -1
+
+    _rfind = _rfind_subsequence
+
+    @classmethod
+    def _has_subsequence(cls, values: Sequence[int], pattern: Sequence[int]) -> bool:
+        return cls._find_subsequence(values, pattern) >= 0
+
+    @staticmethod
+    def _without_trailing_partial_marker(text: str, markers: Sequence[str]) -> str:
+        for marker in markers:
+            max_prefix = min(len(marker) - 1, len(text))
+            for prefix_len in range(max_prefix, 0, -1):
+                if text.endswith(marker[:prefix_len]):
+                    return text[:-prefix_len]
+        return text
+
+    def _extract_reasoning_text(
+        self,
+        model_output: str,
+        *,
+        streaming: bool = False,
+    ) -> tuple[str | None, str | None]:
+        start_index = model_output.find(self.start_token)
+        has_start = start_index >= 0
+        if has_start:
+            model_output = model_output[start_index + len(self.start_token) :]
+
+        end_index = model_output.find(self.end_token)
+        if end_index >= 0:
+            reasoning = model_output[:end_index]
+            content = model_output[end_index + len(self.end_token) :] or None
+        elif has_start or self.thinking_enabled:
+            reasoning = model_output
+            content = None
+        else:
+            reasoning = None
+            content = model_output
+
+        if streaming:
+            if reasoning is not None and content is None:
+                reasoning = self._without_trailing_partial_marker(
+                    reasoning,
+                    (self.end_token,),
+                )
+            if content is not None:
+                content = self._without_trailing_partial_marker(
+                    content,
+                    (self.start_token, self.end_token),
+                )
+
+        return reasoning or None, content or None
+
+    @staticmethod
+    def _delta_text(previous: str | None, current: str | None) -> str | None:
+        previous = previous or ""
+        current = current or ""
+        if not current:
+            return None
+        if current.startswith(previous):
+            return current[len(previous):] or None
+        if not previous:
+            return current or None
+        return None
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        end = self._rfind(input_ids, self.end_token_ids)
-        return end >= 0 and end > self._rfind(input_ids, self.start_token_ids)
+        last_start = self._rfind_subsequence(input_ids, self.start_token_ids)
+        last_end = self._rfind_subsequence(input_ids, self.end_token_ids)
+        return last_end >= 0 and last_end > last_start
 
     def is_reasoning_end_streaming(self, input_ids: Sequence[int], delta_ids: Sequence[int]) -> bool:
-        return self._find(delta_ids, self.end_token_ids) >= 0 or self.is_reasoning_end(input_ids)
+        if self._has_subsequence(delta_ids, self.end_token_ids):
+            return True
+        if not self.is_reasoning_end(input_ids):
+            return False
+        last_end = self._rfind_subsequence(input_ids, self.end_token_ids)
+        delta_start = max(0, len(input_ids) - len(delta_ids) - len(self.end_token_ids))
+        return last_end >= delta_start
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        end = self._find(input_ids, self.end_token_ids)
-        return input_ids[end + len(self.end_token_ids) :] if end >= 0 else []
+        end_start = self._find_subsequence(input_ids, self.end_token_ids)
+        if end_start < 0:
+            return []
+        return input_ids[end_start + len(self.end_token_ids) :]
 
     def extract_reasoning(self, model_output: str, request) -> tuple[str | None, str | None]:
         del request
-        start = model_output.find(self.start_token)
-        if start >= 0:
-            model_output = model_output[start + len(self.start_token) :]
-        end = model_output.find(self.end_token)
-        if end >= 0:
-            return model_output[:end] or None, model_output[end + len(self.end_token) :] or None
-        if start >= 0 or self.thinking_enabled:
-            return model_output or None, None
-        return None, model_output or None
+        return self._extract_reasoning_text(model_output)
 
     def extract_reasoning_streaming(
         self,
@@ -67,16 +138,32 @@ class RWKVReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         del delta_text, previous_token_ids, current_token_ids, delta_token_ids
-        previous = self.extract_reasoning(previous_text, None)
-        current = self.extract_reasoning(current_text, None)
-        reasoning = current[0][len(previous[0] or "") :] if current[0] else None
-        content = current[1][len(previous[1] or "") :] if current[1] else None
-        return DeltaMessage(reasoning=reasoning or None, content=content or None) if reasoning or content else None
+
+        previous_reasoning, previous_content = self._extract_reasoning_text(
+            previous_text,
+            streaming=True,
+        )
+        current_reasoning, current_content = self._extract_reasoning_text(
+            current_text,
+            streaming=True,
+        )
+
+        reasoning_delta = self._delta_text(previous_reasoning, current_reasoning)
+        content_delta = self._delta_text(previous_content, current_content)
+        if reasoning_delta is None and content_delta is None:
+            return None
+        return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        start = self._find(token_ids, self.start_token_ids)
-        end = self._find(token_ids, self.end_token_ids)
-        if start < 0 and not self.thinking_enabled:
+        end_start = self._find_subsequence(token_ids, self.end_token_ids)
+        start_start = self._find_subsequence(token_ids, self.start_token_ids)
+
+        if start_start >= 0:
+            reasoning_start = start_start + len(self.start_token_ids)
+        elif self.thinking_enabled:
+            reasoning_start = 0
+        else:
             return 0
-        begin = start + len(self.start_token_ids) if start >= 0 else 0
-        return max(0, (end if end >= 0 else len(token_ids)) - begin)
+
+        reasoning_end = end_start if end_start >= 0 else len(token_ids)
+        return max(0, reasoning_end - reasoning_start)
