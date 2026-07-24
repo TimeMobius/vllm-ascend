@@ -1,6 +1,10 @@
 import json
 from types import SimpleNamespace
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
 
 from vllm_ascend.tool_parsers.rwkv_tool_parser import RWKVToolParser
@@ -38,6 +42,23 @@ def _stream(
 
 def test_rwkv_tool_parser_is_registered():
     assert ToolParserManager.get_tool_parser("rwkv") is RWKVToolParser
+
+
+def test_rwkv_tool_parser_accepts_upstream_two_arg_signature():
+    chat_tool = ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name="search",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+    )
+
+    parser_with_tools = RWKVToolParser(None, [chat_tool])
+    assert len(parser_with_tools.tools) == 1
+    assert parser_with_tools.tools[0].function.name == "search"
+
+    parser_without_tools = RWKVToolParser(None)
+    assert parser_without_tools.tools == []
 
 
 def test_rwkv_tool_parser_extracts_typed_arguments():
