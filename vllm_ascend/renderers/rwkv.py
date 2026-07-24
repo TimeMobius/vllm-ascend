@@ -19,7 +19,7 @@ from vllm_ascend.tokenizers.rwkv import RWKVTokenizer
 
 
 class RWKVRenderer(BaseRenderer[RWKVTokenizer]):
-    _DEFAULT_STOP_TOKENS = ("<|im_end|>", "<|endoftext|>")
+    _DEFAULT_STOP_TOKENS = ("\n\n", "")
 
     @classmethod
     def from_config(
@@ -38,14 +38,11 @@ class RWKVRenderer(BaseRenderer[RWKVTokenizer]):
         tokenizer = self.tokenizer
         if tokenizer is None:
             return generation_config_fields
-        stop_ids = [
-            token_id
-            for token_id in (
-                tokenizer.convert_tokens_to_ids(token)
-                for token in self._DEFAULT_STOP_TOKENS
-            )
-            if isinstance(token_id, int)
-        ]
+        stop_ids: list[int] = []
+        for token in self._DEFAULT_STOP_TOKENS:
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if isinstance(token_id, int) and token_id not in stop_ids:
+                stop_ids.append(token_id)
         return {
             **generation_config_fields,
             "eos_token_id": stop_ids,

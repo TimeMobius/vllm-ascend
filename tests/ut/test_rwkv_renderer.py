@@ -1,15 +1,16 @@
+import pytest
 from unittest.mock import MagicMock, patch
 
 from vllm_ascend.renderers.rwkv import RWKVRenderer
 
 
 def test_rwkv_renderer_declares_rwkv_stop_tokens():
-    assert RWKVRenderer._DEFAULT_STOP_TOKENS == ("<|im_end|>", "<|endoftext|>")
+    assert RWKVRenderer._DEFAULT_STOP_TOKENS == ("\n\n", "")
 
 
 class MockTokenizer:
     def __init__(self) -> None:
-        self._token_to_id = {"<|im_end|>": 1, "<|endoftext|>": 2, "<bos>": 0}
+        self._token_to_id = {"\n\n": 1, "": 2, "<bos>": 0}
 
     def convert_tokens_to_ids(self, token: str) -> int | list[int]:
         return self._token_to_id.get(token, -1)
@@ -24,11 +25,21 @@ class MockTokenizer:
 class MockModelConfig:
     def __init__(self) -> None:
         self.hf_config = MagicMock()
+        self.renderer_num_workers = 1
+        self.is_multimodal_model = False
+        self.multimodal_config = MagicMock()
+        self.skip_tokenizer_init = False
+        self.allowed_local_media_path = ""
 
 
 class MockVllmConfig:
     def __init__(self) -> None:
         self.model_config = MockModelConfig()
+        self.parallel_config = MagicMock()
+        self.parallel_config._api_process_rank = 0
+        self.parallel_config._api_process_count = 1
+        self.observability_config = MagicMock()
+        self.multimodal_config = None
 
 
 def test_rwkv_renderer_construction():
@@ -72,15 +83,24 @@ def test_rwkv_renderer_render_messages_forwards_chat_template_kwargs():
         media_io_kwargs={"media_type": "image"},
         mm_processor_kwargs={"min_pixels": 256},
     )
-    messages = [{"role": "user", "content": "hello"}]
+
+    captured: dict = {}
+
+    def fake_apply_chat_template(conversation, **kwargs):
+        captured.update(kwargs)
+        return "rendered_prompt"
+
     with patch.object(renderer, "get_tokenizer") as mock_get_tok:
-        mock_get_tok.return_value = mock_tokenizer
-        conversation, prompt = renderer.render_messages(messages, params)
-    assert isinstance(conversation, list)
-    assert isinstance(prompt, dict)
+        mock_get_tok.return_value = MagicMock(apply_chat_template=fake_apply_chat_template)
+        renderer.render_messages([], params)
+
+    assert captured["add_generation_prompt"] is True
+    assert captured["media_io_kwargs"] == {"media_type": "image"}
+    assert captured["mm_processor_kwargs"] == {"min_pixels": 256}
 
 
-def test_rwkv_renderer_stops_without_tokenizer():
+def test_rwkv_renderer_get_tokenizer_raises_when_tokenizer_absent():
     mock_config = MockVllmConfig()
     renderer = RWKVRenderer(mock_config, None)
-    assert renderer.get_tokenizer() is None
+    with pytest.raises(ValueError):
+        renderer.get_tokenizer()
