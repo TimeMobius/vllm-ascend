@@ -41,6 +41,10 @@ def register():
     return "vllm_ascend.platform.NPUPlatform"
 
 
+def register_rwkv() -> None:
+    from . import reasoning, tool_parsers  # noqa: F401
+
+
 def register_connector():
     _ensure_global_patch()
 
