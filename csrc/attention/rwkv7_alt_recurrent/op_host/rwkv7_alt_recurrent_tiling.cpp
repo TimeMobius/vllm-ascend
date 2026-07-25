@@ -214,8 +214,13 @@ void RWKV7AltRecurrentTiling::UpdateDynamicBlockDimByTaskUnits()
     if (taskUnits == 0) {
         taskUnits = 1;
     }
-    uint64_t maxCoreNum = (compileInfo_.aivNum > 0) ? compileInfo_.aivNum : 1;
-    uint64_t selectedCoreNum = (taskUnits < maxCoreNum) ? taskUnits : maxCoreNum;
+    // The kernel processes exactly one work unit (one (batch, head) pair) per block,
+    // so the launch grid must cover every task unit. Capping at the hardware core count
+    // silently drops the remaining work units (e.g. batch*heads=64 with aivNum=40 leaves
+    // heads 40..63 unprocessed and produces garbage in the output). Cap by the block-dim
+    // launch limit instead so the runtime can time-slice across cores.
+    constexpr uint64_t MAX_GRID_DIM = 65535;
+    uint64_t selectedCoreNum = taskUnits > MAX_GRID_DIM ? MAX_GRID_DIM : taskUnits;
     tilingData_.vectorCoreNum = static_cast<uint32_t>(selectedCoreNum);
 }
 
