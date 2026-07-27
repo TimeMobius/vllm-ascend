@@ -1844,7 +1844,13 @@ class RWKV7Block(nn.Module, MambaBase):
         return output, v_first_out
 
 
+def _rwkv7_should_compile(vllm_config) -> bool:
+    from vllm.config import CUDAGraphMode
+    return not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+
+
 @support_torch_compile(
+    enable_if=_rwkv7_should_compile,
     dynamic_arg_dims={
         "input_ids": 0,
         "positions": 0,
