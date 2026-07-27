@@ -76,10 +76,14 @@ RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
 # Required so aclnn loads custom_transformer via ASCEND_OPP_PATH
-# without a host volume mount.
+# without a host volume mount. Also pin load_priority=custom_transformer
+# in opp/vendors/config.ini so the aclop runtime registers the .o binary
+# (vllm-ascend's install.sh runs last for batch_invariant and would
+# otherwise leave priority pointing at the wrong vendor).
 RUN OPP_VENDOR_DIR=/usr/local/Ascend/cann-9.0.1/opp/vendors && \
     SRC=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer && \
     cp -al "$SRC" "$OPP_VENDOR_DIR/custom_transformer" || cp -r "$SRC" "$OPP_VENDOR_DIR/custom_transformer" && \
-    [ -f "$OPP_VENDOR_DIR/custom_transformer/op_api/lib/libcust_opapi.so" ]
+    [ -f "$OPP_VENDOR_DIR/custom_transformer/op_api/lib/libcust_opapi.so" ] && \
+    printf 'load_priority=custom_transformer\n' > "$OPP_VENDOR_DIR/config.ini"
 
 CMD ["/bin/bash"]
