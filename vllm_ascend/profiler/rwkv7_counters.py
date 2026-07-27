@@ -31,12 +31,15 @@ at process exit via atexit.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
+
+import torch
 
 _logger = logging.getLogger("vllm_ascend")
 
@@ -121,21 +124,27 @@ class _EnabledCounters:
             self._atexit_registered = True
             atexit.register(self._emit_summary)
 
+    @property
+    def _graph_safe_lock(self):
+        if torch.compiler.is_compiling():
+            return contextlib.nullcontext()
+        return self._lock
+
     def hit(self, kind: DispatchKind) -> None:
-        with self._lock:
+        with self._graph_safe_lock:
             self._hits[kind.value] += 1
 
     def fallback(
         self, kind: DispatchKind, reason: Literal["guard_false", "kernel_exception"]
     ) -> None:
-        with self._lock:
+        with self._graph_safe_lock:
             if reason == FallbackReason.GUARD_FALSE.value:
                 self._fallback_guard_false[kind.value] += 1
             else:
                 self._fallback_kernel_exception[kind.value] += 1
 
     def snapshot(self) -> _RWKV7CountersSnapshot:
-        with self._lock:
+        with self._graph_safe_lock:
             h = self._hits
             gf = self._fallback_guard_false
             gk = self._fallback_kernel_exception
@@ -158,7 +167,7 @@ class _EnabledCounters:
             )
 
     def reset(self) -> None:
-        with self._lock:
+        with self._graph_safe_lock:
             for k in DispatchKind:
                 self._hits[k.value] = 0
                 self._fallback_guard_false[k.value] = 0
