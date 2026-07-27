@@ -59,9 +59,10 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - **Triton-Ascend dispatch**: 已在真实 NPU 环境完成 dispatch 和 reference parity 验证
 - **AscendC WKV7 kernel**: 已实现并作为可选 recurrent path 提供
 - **Full serve / 真实权重推理**: 已在仓库 `.github/vllm-release-tag.commit` 指定的 vLLM 版本上完成真实权重加载和 HTTP smoke test
-- **END-TO-END decode throughput（910B3, 单卡, 单请求, max_tokens=1024）**:
-  - Cell A eager (`--enforce-eager`)：约 3.65 tok/s（baseline）
-  - Cell B `FULL_DECODE_ONLY` + `cudagraph_capture_sizes=[1]`：约 **14.6 tok/s（4× speedup）**
+- **END-TO-END decode throughput（910B3, 单卡, 单请求）**:
+  - Cell A eager (`--enforce-eager`)：约 3.65 tok/s（baseline，max_tokens=1024）
+  - Cell B `FULL_DECODE_ONLY` + `cudagraph_capture_sizes=[1]`：约 **14.6 tok/s（4× speedup, max_tokens=1024）**
+  - 同 Cell B 跑 `max_tokens=2048`：约 **14.9 tok/s**，speedup 在更长上下文下稳定（无回归）
   - 修复链：`rwkv7_counters.py` graph-safe lock → `attention/utils.py` `@lru_cache` helpers 的 `try/except` → `rwkv7.py` `@support_torch_compile(enable_if=...)`
 
 ### 4.3 版本要求
