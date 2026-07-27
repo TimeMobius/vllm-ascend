@@ -118,7 +118,10 @@ def cache_graph_workspace(
 
 @lru_cache(maxsize=1)
 def needs_layer_aware_fia_graph_replay() -> bool:
-    vllm_config = get_current_vllm_config()
+    try:
+        vllm_config = get_current_vllm_config()
+    except AssertionError:
+        return False
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -180,7 +183,10 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
 
 @lru_cache(maxsize=1)
 def enable_cp():
-    prefill_config = get_current_vllm_config().parallel_config
+    try:
+        prefill_config = get_current_vllm_config().parallel_config
+    except AssertionError:
+        return False
     return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
 
 
