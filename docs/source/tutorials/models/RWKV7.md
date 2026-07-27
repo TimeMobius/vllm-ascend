@@ -59,6 +59,10 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - **Triton-Ascend dispatch**: 已在真实 NPU 环境完成 dispatch 和 reference parity 验证
 - **AscendC WKV7 kernel**: 已实现并作为可选 recurrent path 提供
 - **Full serve / 真实权重推理**: 已在仓库 `.github/vllm-release-tag.commit` 指定的 vLLM 版本上完成真实权重加载和 HTTP smoke test
+- **END-TO-END decode throughput（910B3, 单卡, 单请求, max_tokens=1024）**:
+  - Cell A eager (`--enforce-eager`)：约 3.65 tok/s（baseline）
+  - Cell B `FULL_DECODE_ONLY` + `cudagraph_capture_sizes=[1]`：约 **14.6 tok/s（4× speedup）**
+  - 修复链：`rwkv7_counters.py` graph-safe lock → `attention/utils.py` `@lru_cache` helpers 的 `try/except` → `rwkv7.py` `@support_torch_compile(enable_if=...)`
 
 ### 4.3 版本要求
 
@@ -71,7 +75,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 > **注意**: 启动前请使用 `.github/vllm-release-tag.commit` 设置 `VLLM_VERSION`，确保 vLLM 与
 > vLLM Ascend 版本对齐。
 
-### 5.1 Recommended Startup Command
+### 5.1 Recommended Startup Command (eager)
 
 ```bash
 # 强制使用 torch reference path（避免 triton-ascend FLA 未验证问题）
@@ -93,13 +97,35 @@ vllm serve /hikscale/models/RWKV/rwkv-step-12250-bf16-hf \
 
 > **保守说明**: `--max-model-len 32768` 为保守默认值，checkpoint 支持 max_position 86016，请根据实际输入长度调整。过高设置会导致 NPU 内存压力。
 
-### 5.2 Device Gating 说明
+### 5.2 Faster Startup (ACLGraph FULL_DECODE_ONLY, T=1 单请求 4× speedup)
+
+910B3 single NPU 上，`FULL_DECODE_ONLY` + `cudagraph_capture_sizes=[1]` 把 T=1 解码从约 3.65 tok/s 提升到约 **14.6 tok/s**，且 bit-identical。性能开关保持 eager 默认（`RWKV7_USE_ALT_RECURRENT_DECODE=1`、`RWKV7_USE_FUSED_LNX_RKVRES_XG=1`），只需增加 `--compilation-config`：
+
+```bash
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=1
+export TASK_QUEUE_ENABLE=1
+
+vllm serve /hikscale/models/RWKV/rwkv-step-12250-bf16-hf \
+    --served-model-name rwkv7 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --enforce-eager \
+    --max-model-len 8192 \
+    --max-num-seqs 1 \
+    --max-num-batched-tokens 512 \
+    --gpu-memory-utilization 0.85 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'
+```
+
+> **约束**: 该模式已针对单 NPU + T=1 + `max_num_seqs=1` 验证。多并发 / prefill 场景未在本 commit 链中验证。
+
+### 5.3 Device Gating 说明
 
 本地 RWKV7 模型在 NPU 上直接调用 vllm-ascend 的 Triton-Ascend FLA dispatch，**当 dispatch 不可用时自动回退到 torch reference path**。环境变量 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可显式禁用 fused path，强制使用 torch reference。
 
 ## 6 Functional Verification
-
-> **注意**: 以下 curl 请求仅在版本对齐后有效。当前服务启动因 4.3 所述版本不匹配而失败。
 
 ### 6.1 Service Readiness
 
@@ -122,7 +148,7 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-Expected: HTTP 200，非空输出。
+Expected: HTTP 200，非空输出。FULL_DECODE_ONLY 模式 + T=1 场景下，bit-equality 与 eager 模式一致（同一 prompt、temperature=0）。
 
 ## 7 Design Reference
 
@@ -134,3 +160,7 @@ Expected: HTTP 200，非空输出。
 - 隔离 kernel 实现: `a134b050`, `b33f5ee9`, `3de65355`, `95e135c2`
 - 导出: `b40dad7b`
 - Dispatch: `7c3bc04c`
+- FULL_DECODE_ONLY 修复链:
+  - `c5201a706` fix(rwkv7_counters): make counter methods graph-safe under torch.compile fullgraph_capture
+  - `edfbcfc7b` fix(attention): handle missing vllm_config in lru_cached helpers
+  - `2988e2a41` fix(rwkv7): skip torch.compile in FULL/FULL_DECODE_ONLY graph mode
