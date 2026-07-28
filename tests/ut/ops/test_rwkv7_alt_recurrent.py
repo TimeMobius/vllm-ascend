@@ -80,7 +80,7 @@ class TestRWKV7AltRecurrentParity(unittest.TestCase):
         a = torch.randn(B, T, H, 64, device='npu', dtype=torch.float32)
         initial_state = torch.randn(B, H, 64, 64, device='npu', dtype=torch.float32)
 
-        out, final_state = torch.ops.ascend.npu_rwkv7_alt_recurrent(
+        out, final_state = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
             r, w, k, v, kk, a, initial_state
         )
 
@@ -96,7 +96,7 @@ class TestRWKV7AltRecurrentParity(unittest.TestCase):
         a = torch.randn(1, 1, 1, 32, device='npu', dtype=torch.float32)
 
         with self.assertRaises(RuntimeError):
-            torch.ops.ascend.npu_rwkv7_alt_recurrent(r, w, k, v, kk, a, None)
+            torch.ops._C_ascend.npu_rwkv7_alt_recurrent(r, w, k, v, kk, a, None)
 
 
 class TestRWKV7AltRecurrentCUDAReference(unittest.TestCase):
