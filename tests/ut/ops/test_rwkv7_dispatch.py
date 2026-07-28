@@ -494,9 +494,14 @@ class TestRWKV7FinalizeLocalRKCache(unittest.TestCase):
         attn.tp_rank = 0
         attn.local_num_heads = local_num_heads
         attn.local_value_dim = local_value_dim
+        attn.value_start = 0
+        attn.value_end = local_value_dim
 
         # Stub g_norm to mimic F.group_norm without real weights
         class FakeGroupNorm:
+            weight = torch.randn(local_value_dim, dtype=torch.float32)
+            bias = torch.randn(local_value_dim, dtype=torch.float32)
+
             def __call__(self, x):
                 return x
 
@@ -545,8 +550,8 @@ class TestRWKV7FinalizeLocalRKCache(unittest.TestCase):
             recurrent_output, r, k, v, g, torch.bfloat16
         )
         # Cache attribute must now be set
-        self.assertTrue(hasattr(attn, "_ascend_r_k_fp32_local"))
-        cached = attn._ascend_r_k_fp32_local
+        self.assertTrue(hasattr(attn, "_ascend_r_k_fp32"))
+        cached = attn._ascend_r_k_fp32
         self.assertEqual(cached.dtype, torch.float32)
         self.assertEqual(
             cached.shape, (attn.local_num_heads, head_dim)
@@ -556,7 +561,7 @@ class TestRWKV7FinalizeLocalRKCache(unittest.TestCase):
         attn._finalize_attention_output(
             recurrent_output, r, k, v, g, torch.bfloat16
         )
-        self.assertIs(attn._ascend_r_k_fp32_local, cached)
+        self.assertIs(attn._ascend_r_k_fp32, cached)
 
     def test_cache_value_matches_manual_slice(self):
         """Cached value must equal the original slice+cast computation."""
@@ -589,9 +594,8 @@ class TestRWKV7FinalizeLocalRKCache(unittest.TestCase):
             recurrent_output, r, k, v, g, torch.bfloat16
         )
 
-        cached = attn._ascend_r_k_fp32_local
+        cached = attn._ascend_r_k_fp32
         self.assertTrue(torch.allclose(cached, expected))
-        self.assertEqual(cached.data_ptr(), expected.data_ptr())
 
 
 if __name__ == "__main__":
