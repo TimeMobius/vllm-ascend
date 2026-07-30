@@ -103,7 +103,6 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip install --force-reinstall --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    python3 -m pip install flash-attn==2.7.4.post1 --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip install --no-cache-dir --no-deps "numpy==2.4.2" "scipy==1.16.0" && \
     python3 -m pip cache purge
 
