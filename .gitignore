@@ -229,3 +229,6 @@ csrc/third_party/
 .codegraph/
 
 .vllm_ascend/
+
+# agent session metadata
+.omo/
