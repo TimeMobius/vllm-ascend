@@ -9,7 +9,13 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    enable_custom_op,
+    get_ascend_device_type,
+    global_stream,
+    npu_stream_switch,
+)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
