@@ -86,10 +86,12 @@ class TestRWKV7CountersEnabled(unittest.TestCase):
     def test_hit_increments_correct_kind(self):
         mod = self._reload()
         mod.reset_counters()
+        mod.dispatch_hit(mod.DispatchKind.RECURRENT_T1)
         mod.dispatch_hit(mod.DispatchKind.RECURRENT_SCAN)
         mod.dispatch_hit(mod.DispatchKind.RECURRENT_SCAN)
         mod.dispatch_hit(mod.DispatchKind.MIX6)
         snap = mod.snapshot_counters()
+        self.assertEqual(snap.recurrent_t1_hits, 1)
         self.assertEqual(snap.recurrent_scan_hits, 2)
         self.assertEqual(snap.mix6_hits, 1)
 

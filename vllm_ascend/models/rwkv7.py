@@ -1852,7 +1852,6 @@ def _rwkv7_should_compile(vllm_config) -> bool:
 @support_torch_compile(
     enable_if=_rwkv7_should_compile,
     dynamic_arg_dims={
-        "input_ids": 0,
         "positions": 0,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,

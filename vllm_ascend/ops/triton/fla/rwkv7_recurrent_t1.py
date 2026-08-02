@@ -13,11 +13,17 @@ both of which materialize intermediate tensors. This kernel performs:
                       + k[h, d] * v[h, v]
   reduce_out[h, v] = sum_d new_state[h, d, v] * r[h, d]
 
-in a single launch with parallel work over ``[H_local, BLOCK_V]``.
+in a single launch with parallel work over ``[B, H_local, BLOCK_V]``.
 """
 
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
+
+from vllm_ascend import envs
+from vllm_ascend.profiler.rwkv7_counters import (
+    DispatchKind,
+    dispatch_hit,
+)
 
 
 def _rwkv7_recurrent_t1_reference(
@@ -43,7 +49,7 @@ def _rwkv7_recurrent_t1_reference(
 if HAS_TRITON:
 
     @triton.jit
-    def rwkv7_recurrent_t1_fwd_kernel(
+    def _rwkv7_recurrent_t1_fwd_kernel(
         state_ptr,
         w_ptr,
         kk_ptr,
@@ -58,52 +64,67 @@ if HAS_TRITON:
         V: tl.constexpr,
         BLOCK_V: tl.constexpr,
     ):
-        """One program per (head, v_block) pair.
+        """One program per (batch, head, v_block) triple.
 
         All tensors are contiguous along the relevant axes:
-          state:      [H, D, V]   (row-major: h * D*V + d * V + v)
-          w/kk/a/k:   [H, D]      (row-major: h * D + d)
-          v/r (r):    [H, V]      (row-major: h * V + v)
-          out_state:  [H, D, V]   (row-major)
-          out_reduce: [H, V]      (row-major)
+          state:      [B, H, D, V] (row-major)
+          w/kk/a/k/r: [B, H, D]    (row-major)
+          v:          [B, H, V]    (row-major)
+          out_state:  [B, H, D, V] (row-major)
+          out_reduce: [B, H, V]    (row-major)
         """
-        h = tl.program_id(0)
-        v_block_idx = tl.program_id(1)
+        batch_idx = tl.program_id(0)
+        h = tl.program_id(1)
+        v_block_idx = tl.program_id(2)
 
         v_offsets = v_block_idx * BLOCK_V + tl.arange(0, BLOCK_V)
         v_mask = v_offsets < V
 
-        d_offsets = tl.arange(0, D)
-
-        state_base = state_ptr + h * D * V
-        out_state_base = out_state_ptr + h * D * V
+        state_base = state_ptr + (batch_idx * H + h) * D * V
+        out_state_base = out_state_ptr + (batch_idx * H + h) * D * V
 
         # Load [V] (length V) constant within this program
-        v_vals = tl.load(v_ptr + h * V + v_offsets, mask=v_mask, other=0.0)
+        v_vals = tl.load(
+            v_ptr + (batch_idx * H + h) * V + v_offsets,
+            mask=v_mask,
+            other=0.0,
+        ).to(tl.float32)
         sa_acc = tl.zeros((BLOCK_V,), dtype=tl.float32)
         # sa[v] = sum_d state[h, d, v] * (-kk[h, d])
         for d in tl.static_range(0, D):
-            kk_d = tl.load(kk_ptr + h * D + d)
-            state_d = tl.load(state_base + d * V + v_offsets, mask=v_mask, other=0.0)
+            kk_d = tl.load(kk_ptr + (batch_idx * H + h) * D + d).to(tl.float32)
+            state_d = tl.load(
+                state_base + d * V + v_offsets,
+                mask=v_mask,
+                other=0.0,
+            ).to(tl.float32)
             sa_acc += state_d * (-kk_d)
         # sa_acc now holds sa[h, v_block] for this v_block
 
         # Loop over d again to write new_state and accumulate reduce
         reduce_acc = tl.zeros((BLOCK_V,), dtype=tl.float32)
         for d in tl.static_range(0, D):
-            w_d = tl.exp(tl.load(w_ptr + h * D + d))
-            kk_d = tl.load(kk_ptr + h * D + d)
-            a_d = tl.load(a_ptr + h * D + d)
-            k_d = tl.load(k_ptr + h * D + d)
-            r_d = tl.load(r_ptr + h * D + d)
+            w_d = tl.exp(tl.load(w_ptr + (batch_idx * H + h) * D + d).to(tl.float32))
+            kk_d = tl.load(kk_ptr + (batch_idx * H + h) * D + d).to(tl.float32)
+            a_d = tl.load(a_ptr + (batch_idx * H + h) * D + d).to(tl.float32)
+            k_d = tl.load(k_ptr + (batch_idx * H + h) * D + d).to(tl.float32)
+            r_d = tl.load(r_ptr + (batch_idx * H + h) * D + d).to(tl.float32)
 
-            state_d = tl.load(state_base + d * V + v_offsets, mask=v_mask, other=0.0)
+            state_d = tl.load(
+                state_base + d * V + v_offsets,
+                mask=v_mask,
+                other=0.0,
+            ).to(tl.float32)
             ka = kk_d * a_d
             new_d = w_d * state_d + ka * sa_acc + k_d * v_vals
             tl.store(out_state_base + d * V + v_offsets, new_d, mask=v_mask)
             reduce_acc += new_d * r_d
 
-        tl.store(out_reduce_ptr + h * V + v_offsets, reduce_acc, mask=v_mask)
+        tl.store(
+            out_reduce_ptr + (batch_idx * H + h) * V + v_offsets,
+            reduce_acc,
+            mask=v_mask,
+        )
 
 
 def rwkv7_recurrent_t1(
@@ -121,11 +142,13 @@ def rwkv7_recurrent_t1(
       - Triton available
       - device is NPU/CUDA
       - all inputs float32, contiguous, on the same device
-      - shapes match [H, D], [H, D, V], [H, V]
+      - shapes match [B, H, D, V], [B, H, D], [B, H, V], or their rank-3
+        unbatched equivalents
       - head_dim and BLOCK_V fit within Triton power-of-two
     """
     if (
         not HAS_TRITON
+        or envs.VLLM_ASCEND_RWKV7_DISABLE_TRITON
         or recurrent_state.device.type not in ("npu", "cuda")
         or recurrent_state.dtype != torch.float32
         or w.dtype != torch.float32
@@ -146,14 +169,29 @@ def rwkv7_recurrent_t1(
             recurrent_state, w, kk, a, k, v, r
         )
 
-    H, D, V = recurrent_state.shape
+    if recurrent_state.ndim == 3:
+        is_batched = False
+        state_4d = recurrent_state.unsqueeze(0)
+        w_3d, kk_3d, a_3d, k_3d, v_3d, r_3d = (
+            tensor.unsqueeze(0) for tensor in (w, kk, a, k, v, r)
+        )
+    elif recurrent_state.ndim == 4:
+        is_batched = True
+        state_4d = recurrent_state
+        w_3d, kk_3d, a_3d, k_3d, v_3d, r_3d = w, kk, a, k, v, r
+    else:
+        return _rwkv7_recurrent_t1_reference(
+            recurrent_state, w, kk, a, k, v, r
+        )
+
+    B, H, D, V = state_4d.shape
     if (
-        w.shape != (H, D)
-        or kk.shape != (H, D)
-        or a.shape != (H, D)
-        or k.shape != (H, D)
-        or v.shape != (H, V)
-        or r.shape != (H, V)
+        w_3d.shape != (B, H, D)
+        or kk_3d.shape != (B, H, D)
+        or a_3d.shape != (B, H, D)
+        or k_3d.shape != (B, H, D)
+        or v_3d.shape != (B, H, V)
+        or r_3d.shape != (B, H, D)
     ):
         return _rwkv7_recurrent_t1_reference(
             recurrent_state, w, kk, a, k, v, r
@@ -165,18 +203,20 @@ def rwkv7_recurrent_t1(
             recurrent_state, w, kk, a, k, v, r
         )
 
-    new_state = torch.empty_like(recurrent_state)
-    reduce_out = torch.empty((H, V), device=recurrent_state.device, dtype=torch.float32)
+    new_state = torch.empty_like(state_4d)
+    reduce_out = torch.empty(
+        (B, H, V), device=recurrent_state.device, dtype=torch.float32
+    )
 
-    grid = (H, triton.cdiv(V, BLOCK_V))
-    rwkv7_recurrent_t1_fwd_kernel[grid](
-        recurrent_state,
-        w,
-        kk,
-        a,
-        k,
-        v,
-        r,
+    grid = (B, H, triton.cdiv(V, BLOCK_V))
+    _rwkv7_recurrent_t1_fwd_kernel[grid](
+        state_4d,
+        w_3d,
+        kk_3d,
+        a_3d,
+        k_3d,
+        v_3d,
+        r_3d,
         new_state,
         reduce_out,
         H=H,
@@ -185,4 +225,7 @@ def rwkv7_recurrent_t1(
         BLOCK_V=BLOCK_V,
         num_warps=4 if BLOCK_V <= 64 else 8,
     )
-    return new_state, reduce_out
+    dispatch_hit(DispatchKind.RECURRENT_T1)
+    if is_batched:
+        return new_state, reduce_out
+    return new_state.squeeze(0), reduce_out.squeeze(0)

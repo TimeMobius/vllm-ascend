@@ -45,6 +45,7 @@ _logger = logging.getLogger("vllm_ascend")
 
 
 class DispatchKind(Enum):
+    RECURRENT_T1 = "recurrent_t1"
     RECURRENT_SCAN = "recurrent_scan"
     RECURRENT_SCAN_VARLEN = "recurrent_scan_varlen"
     MIX6 = "mix6"
@@ -59,6 +60,9 @@ class FallbackReason(Enum):
 
 @dataclass
 class _RWKV7CountersSnapshot:
+    recurrent_t1_hits: int
+    recurrent_t1_fallback_guard_false: int
+    recurrent_t1_fallback_kernel_exception: int
     recurrent_scan_hits: int
     recurrent_scan_fallback_guard_false: int
     recurrent_scan_fallback_kernel_exception: int
@@ -87,6 +91,9 @@ class _DisabledCounters:
 
     def snapshot(self) -> _RWKV7CountersSnapshot:
         return _RWKV7CountersSnapshot(
+            recurrent_t1_hits=0,
+            recurrent_t1_fallback_guard_false=0,
+            recurrent_t1_fallback_kernel_exception=0,
             recurrent_scan_hits=0,
             recurrent_scan_fallback_guard_false=0,
             recurrent_scan_fallback_kernel_exception=0,
@@ -149,6 +156,9 @@ class _EnabledCounters:
             gf = self._fallback_guard_false
             gk = self._fallback_kernel_exception
             return _RWKV7CountersSnapshot(
+                recurrent_t1_hits=h["recurrent_t1"],
+                recurrent_t1_fallback_guard_false=gf["recurrent_t1"],
+                recurrent_t1_fallback_kernel_exception=gk["recurrent_t1"],
                 recurrent_scan_hits=h["recurrent_scan"],
                 recurrent_scan_fallback_guard_false=gf["recurrent_scan"],
                 recurrent_scan_fallback_kernel_exception=gk["recurrent_scan"],
@@ -177,12 +187,16 @@ class _EnabledCounters:
         snap = self.snapshot()
         summary = (
             "[vllm-ascend] [rwkv7_profile] RWKV7 dispatch summary:\n"
+            "  recurrent_t1:          hits={}  fallback_guard_false={}  fallback_kernel_exception={}\n"
             "  recurrent_scan:        hits={}  fallback_guard_false={}  fallback_kernel_exception={}\n"
             "  recurrent_scan_varlen: hits={}  fallback_guard_false={}  fallback_kernel_exception={}\n"
             "  mix6:                   hits={}  fallback_guard_false={}  fallback_kernel_exception={}\n"
             "  kk_pre:                 hits={}  fallback_guard_false={}  fallback_kernel_exception={}\n"
             "  epilogue:               hits={}  fallback_guard_false={}  fallback_kernel_exception={}"
         ).format(
+            snap.recurrent_t1_hits,
+            snap.recurrent_t1_fallback_guard_false,
+            snap.recurrent_t1_fallback_kernel_exception,
             snap.recurrent_scan_hits,
             snap.recurrent_scan_fallback_guard_false,
             snap.recurrent_scan_fallback_kernel_exception,
