@@ -161,12 +161,16 @@ class TestFusedRecurrentRWKV7ReferenceCPU(unittest.TestCase):
 
         out, final_state, hc = fused_recurrent_rwkv7(
             r=r, w=w, k=k, v=v, kk=kk, a=a,
-            scale=1.0, output_final_state=True, output_checkpoint_states=True,
+            scale=1.0, output_final_state=True,
+            checkpoint_positions=torch.empty(0, dtype=torch.long),
+            checkpoint_offsets=torch.tensor([0, 0], dtype=torch.long),
+            output_checkpoint_states=True,
         )
 
         self.assertIsInstance(out, torch.Tensor)
         self.assertIsInstance(final_state, torch.Tensor)
-        self.assertIsNone(hc)
+        self.assertIsInstance(hc, torch.Tensor)
+        self.assertEqual(hc.numel(), 0)
 
     def test_cpu_scale_factor(self):
         """Test that scale factor is applied correctly on CPU fallback."""
@@ -244,7 +248,8 @@ class TestRWKV7RecurrentT1(unittest.TestCase):
 
     def test_reference_cpu_fp32(self):
         from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
-            _rwkv7_recurrent_t1_reference, rwkv7_recurrent_t1,
+            _rwkv7_recurrent_t1_reference,
+            rwkv7_recurrent_t1,
         )
         H, D, V = 4, 16, 32
         state = torch.randn(H, D, V, dtype=torch.float32)
@@ -253,7 +258,7 @@ class TestRWKV7RecurrentT1(unittest.TestCase):
         a = torch.randn(H, D, dtype=torch.float32)
         k = torch.randn(H, D, dtype=torch.float32)
         v = torch.randn(H, V, dtype=torch.float32)
-        r = torch.randn(H, V, dtype=torch.float32)
+        r = torch.randn(H, D, dtype=torch.float32)
 
         ref_state, ref_out = _rwkv7_recurrent_t1_reference(state, w, kk, a, k, v, r)
         got_state, got_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)
@@ -273,7 +278,7 @@ class TestRWKV7RecurrentT1(unittest.TestCase):
         a = torch.randn(H, D, dtype=torch.bfloat16)
         k = torch.randn(H, D, dtype=torch.bfloat16)
         v = torch.randn(H, V, dtype=torch.bfloat16)
-        r = torch.randn(H, V, dtype=torch.bfloat16)
+        r = torch.randn(H, D, dtype=torch.bfloat16)
 
         # Must not crash (falls back to fp32 ref via guard)
         new_state, reduce_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)
@@ -286,7 +291,8 @@ class TestRWKV7BlockNorms(unittest.TestCase):
 
     def test_reference_cpu(self):
         from vllm_ascend.ops.triton.fla.rwkv7_block_norms import (
-            _rwkv7_block_norms_reference, rwkv7_block_norms,
+            _rwkv7_block_norms_reference,
+            rwkv7_block_norms,
         )
         H = 4096
         residual = torch.randn(1, H, dtype=torch.float32)
