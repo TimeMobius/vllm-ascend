@@ -9,11 +9,19 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 _SAMPLING_EPS = 1e-5
+
+# Ensure the _C_ascend extension is loaded at import time so that
+# torch.ops._C_ascend.npu_apply_top_k_top_p is registered before any
+# sampling path can reach it. Without this, RWKV7 (which does not
+# trigger the RMSNorm/quant fusion pass that normally calls
+# enable_custom_op) can hit AttributeError on the first non-greedy
+# sampling request in the EngineCore subprocess.
+enable_custom_op()
 
 
 def random_sample(
@@ -254,11 +262,13 @@ def _apply_top_k_top_p_ascendc(
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
+            enable_custom_op()
             gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
         return gathered_vals, gathered_idx
 
     if p is None and k is None:
         return logits
+    enable_custom_op()
     return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
 
 
