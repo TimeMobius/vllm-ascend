@@ -1845,7 +1845,6 @@ class RWKV7Block(nn.Module, MambaBase):
 
 
 def _rwkv7_should_compile(vllm_config) -> bool:
-    from vllm.config import CUDAGraphMode
     return not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
 
 
