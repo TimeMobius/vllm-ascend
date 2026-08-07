@@ -12,9 +12,23 @@
  * \brief RWKV7 alt recurrent kernel for Ascend NPU.
  * Grid: (batch * numHeads), each block processes one (batch, head) pair.
  * Each block processes ALL 64 value_idx columns, maintaining independent state for each.
- * Matches /mnt/data/Codes/vllm/csrc/rwkv7_alt_recurrent.cu math:
- * - Output: [B, T, H, 64] full tensor
- * - Final state: [B, H, 64, 64] full tensor (each column has independent state)
+ *
+ * Output layout: out [B, T, H, 64], final_state [B, H, D=64, V=64]
+ *
+ * Internal state representation:
+ *   - The recurrence uses a transposed view: the kernel stores
+ *     stateMatrix[vIdx][kIdx] (v outer axis, k inner axis) and writes
+ *     it to the [B, H, D, V] allocation at offset stateBase + k*V + v.
+ *   - When D == V == 64, that offset equals the [B, H, D=kIdx, V=vIdx]
+ *     slot of a contiguous [B, H, D, V] tensor and the stored value
+ *     equals the FP32 torch reference's state[k, v].
+ *   - Therefore the native final_state tensor returned to Python is
+ *     already [B, H, D, V]-semantic; no transpose is required at the
+ *     call site (rwkv7_ascend.models.rwkvv7 decode path and the
+ *     prefill recurrent-scan patch both treat the native layout as
+ *     the reference layout).
+ *
+ * Matches /mnt/data/Codes/vllm/csrc/rwkv7_alt_recurrent.cu math.
  */
 
 #ifndef __RWKV7_ALT_RECURRENT_KERNEL_H_
@@ -57,11 +71,7 @@ public:
 
     __aicore__ inline void Init(const RWKV7AltInitParams& initParams, TPipe* pipe)
     {
-        uint64_t blockDim = GetBlockNum();
         blockIdx = GetBlockIdx();
-        if (blockIdx >= blockDim) {
-            return;
-        }
         pipe_ = pipe;
         SetGlobalTensors(initParams);
         InitLocalBuffers();
