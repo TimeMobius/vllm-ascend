@@ -554,36 +554,52 @@ def backend_ascend(
 
 def _do_warmup(
     backend: str,
-    inputs_for_warmup: dict[str, torch.Tensor],
+    inputs_template: dict[str, torch.Tensor],
 ) -> None:
-    """Run exactly 20 warmup calls — no synchronise, copies or logging."""
+    """Run exactly 20 warmup calls — no synchronise, copies or logging.
+
+    ``inputs_template`` is read-only; each call rebuilds a fresh dict whose
+    tensors are independent clones so that any backend (notably AscendC)
+    that mutates ``initial_state`` in-place cannot corrupt later warmup
+    iterations.  The template tensors themselves are never touched.
+    """
     for _ in range(WARMUP_CALLS):
+        inputs = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in inputs_template.items()}
         if backend == "torch":
-            _ = backend_torch(inputs_for_warmup)
+            _ = backend_torch(inputs)
         elif backend == "triton":
-            _ = backend_triton(inputs_for_warmup)
+            _ = backend_triton(inputs)
         elif backend == "ascend":
-            _ = backend_ascend(inputs_for_warmup)
+            _ = backend_ascend(inputs)
         else:
             raise ValueError(f"Unknown backend {backend!r}")
 
 
 def _time_chain(
     backend: str,
-    inputs_for_timing: dict[str, torch.Tensor],
+    inputs_template: dict[str, torch.Tensor],
 ) -> float:
-    """Run exactly 100 timed calls with one fence pair around them."""
+    """Run exactly 100 timed calls with one fence pair around them.
+
+    See :func:`_do_warmup` for the per-call clone rationale.  Per-call
+    allocation is outside the timed region (the timing fence measures
+    only the kernel invocation, not the input-clone bookkeeping).
+    """
+    inputs = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in inputs_template.items()}
+    torch.npu.synchronize()
     t0 = time.perf_counter()
     for _ in range(TIMED_CALLS):
+        inputs["initial_state"] = inputs_template["initial_state"].clone()
         if backend == "torch":
-            _ = backend_torch(inputs_for_timing)
+            _ = backend_torch(inputs)
         elif backend == "triton":
-            _ = backend_triton(inputs_for_timing)
+            _ = backend_triton(inputs)
         elif backend == "ascend":
-            _ = backend_ascend(inputs_for_timing)
+            _ = backend_ascend(inputs)
         else:
             raise ValueError(f"Unknown backend {backend!r}")
     t1 = time.perf_counter()
+    torch.npu.synchronize()
     return t1 - t0
 
 
@@ -736,10 +752,12 @@ def measure_one(
     # warmup pass so the timed pass uses a fresh, independent copy.
     initial_state_template = fresh_inputs["initial_state"].clone()
 
-    # 2) Pre-warm with a discarded independent initial state, so the
-    #    timed pass doesn't see JIT/compile artefacts.  Use the cloned
-    #    buffers so subsequent backends cannot see a polluted state.
-    warmup_inputs = {
+    # --- 2) Pre-warm with a discarded independent initial state, so the
+    #    timed pass doesn't see JIT/compile artefacts.  Pass the template
+    #    tensors (not clones) so the per-call clone happens inside
+    #    _do_warmup; this protects against backends that mutate
+    #    ``initial_state`` in place across the 20 warmup iterations.
+    warmup_inputs_template = {
             "r": fresh_inputs["r"],
             "w": fresh_inputs["w"],
             "k": fresh_inputs["k"],
@@ -842,7 +860,7 @@ def measure_one(
     # --- 3) Warmup (20 calls) under the same fence contract
     torch.npu.synchronize()
     try:
-        _do_warmup(backend, warmup_inputs)
+        _do_warmup(backend, warmup_inputs_template)
     except Exception as exc:
         torch.npu.synchronize()
         return Measurement(
@@ -860,24 +878,24 @@ def measure_one(
         )
     torch.npu.synchronize()
 
-    # --- 4) Prepare the independent initial state for the timed chain.
-    # Pass fresh clones to the warmup/timed path so backends that may
-    # mutate inputs cannot corrupt later iterations within this single
-    # measurement either.
-    timing_inputs = {
-        "r": fresh_inputs["r"].clone(),
-        "w": fresh_inputs["w"].clone(),
-        "k": fresh_inputs["k"].clone(),
-        "v": fresh_inputs["v"].clone(),
-        "kk": fresh_inputs["kk"].clone(),
-        "a": fresh_inputs["a"].clone(),
-        "initial_state": initial_state_template.clone(),
+    # --- 4) Prepare the input template for the timed chain.  Per-call
+    # cloning (including a fresh ``initial_state`` every iteration) is
+    # handled inside ``_time_chain`` so each timed call observes the
+    # original state and is unaffected by any in-place mutation from
+    # the previous timed call.
+    timing_inputs_template = {
+        "r": fresh_inputs["r"],
+        "w": fresh_inputs["w"],
+        "k": fresh_inputs["k"],
+        "v": fresh_inputs["v"],
+        "kk": fresh_inputs["kk"],
+        "a": fresh_inputs["a"],
+        "initial_state": initial_state_template,
     }
-    timing_inputs["initial_state"] = initial_state_template.clone()
 
     # --- 5) Fence: sync, time 100 calls, sync
     torch.npu.synchronize()
-    elapsed = _time_chain(backend, timing_inputs)
+    elapsed = _time_chain(backend, timing_inputs_template)
     torch.npu.synchronize()
 
     per_step = elapsed / TIMED_CALLS
