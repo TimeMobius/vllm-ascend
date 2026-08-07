@@ -1,0 +1,3151 @@
+{
+  "metadata": {
+    "script": "benchmarks/rwkv7/benchmark_decode_t1.py",
+    "git_sha": "7d30a62afcde75811285945e9ab42d001c1b3c97",
+    "git_branch": "fix/rwkv7-api-compat",
+    "device_index": 0,
+    "device_name": "Ascend910B3",
+    "device_capability": null,
+    "ascend_rt_visible_devices": "0",
+    "service_conflict_check": {
+      "service_port": 8000,
+      "service_npu_index": 4,
+      "benchmark_npu_index": 0,
+      "rationale": "Port-8000 vLLM service binds NPU4 via ASCEND_RT_VISIBLE_DEVICES=4; benchmark selects a different physical NPU to avoid contention."
+    },
+    "python_version": "3.11.15",
+    "torch_version": "2.10.0+cpu",
+    "torch_npu_version": "2.10.0.post2",
+    "vllm_version": "dev",
+    "vllm_ascend_version": "unknown",
+    "dimensions": {
+      "H": 32,
+      "D": 64,
+      "V": 64,
+      "T": 1
+    },
+    "dtype": "float32",
+    "matrices": [
+      "state[B,H,D,V]",
+      "w[B,H,D]",
+      "kk[B,H,D]",
+      "a[B,H,D]",
+      "k[B,H,D]",
+      "v[B,H,V]",
+      "r[B,H,D]"
+    ],
+    "batch_sizes": [
+      1,
+      2,
+      8,
+      16,
+      32,
+      64,
+      128,
+      256,
+      512
+    ],
+    "seed_family": "linear(base + rep_id * stride)",
+    "seed_base": 12345,
+    "seed_stride": 1009,
+    "seed_per_repetition_offset": 1009,
+    "backends": [
+      "torch_reference",
+      "triton_t1",
+      "ascendc_alt_recurrent"
+    ],
+    "warmup_calls": 20,
+    "timed_calls": 100,
+    "repetitions": 3,
+    "timing_unit": "milliseconds",
+    "timing_instrument": "torch.npu.Event(enable_timing=True)",
+    "timing_fence_contract": "torch.npu.synchronize(); s_warmup = s0.clone(); for _ in range(20): step_fn(s_warmup, ...); torch.npu.synchronize(); s_timed = s0.clone(); torch.npu.synchronize(); start_event.record(); for _ in range(100): step_fn(s_timed, ...); end_event.record(); torch.npu.synchronize(); elapsed_ms = start_event.elapsed_time(end_event)",
+    "timed_chain_rules": "no synchronize, no CPU copy, no .item(), no logging, no comparison between any backend's running state and the reference",
+    "tolerances": {
+      "atol": 0.0002,
+      "rtol": 0.0002
+    },
+    "w_distribution": "Normal(mean=-2.0, std=0.05) -> exp(w) in (0,1)"
+  },
+  "results": [
+    {
+      "backend": "torch_reference",
+      "batch_size": 1,
+      "shape": {
+        "state": [
+          1,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          1,
+          32,
+          64
+        ],
+        "kk": [
+          1,
+          32,
+          64
+        ],
+        "a": [
+          1,
+          32,
+          64
+        ],
+        "k": [
+          1,
+          32,
+          64
+        ],
+        "v": [
+          1,
+          32,
+          64
+        ],
+        "r": [
+          1,
+          32,
+          64
+        ],
+        "output": [
+          1,
+          32,
+          64
+        ],
+        "final_state": [
+          1,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 32.944801330566406,
+          "per_step_ms": 0.3294480133056641,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 32.92567825317383,
+          "per_step_ms": 0.3292567825317383,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 32.61595916748047,
+          "per_step_ms": 0.3261595916748047,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 32.82881291707357,
+          "median": 32.92567825317383,
+          "min": 32.61595916748047,
+          "max": 32.944801330566406,
+          "stdev": 0.15071266714982717
+        },
+        "per_step_ms": {
+          "mean": 0.3282881291707357,
+          "median": 0.3292567825317383,
+          "min": 0.3261595916748047,
+          "max": 0.3294480133056641,
+          "stdev": 0.0015071266714982825
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 1,
+      "shape": {
+        "state": [
+          1,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          1,
+          32,
+          64
+        ],
+        "kk": [
+          1,
+          32,
+          64
+        ],
+        "a": [
+          1,
+          32,
+          64
+        ],
+        "k": [
+          1,
+          32,
+          64
+        ],
+        "v": [
+          1,
+          32,
+          64
+        ],
+        "r": [
+          1,
+          32,
+          64
+        ],
+        "output": [
+          1,
+          32,
+          64
+        ],
+        "final_state": [
+          1,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 24.339540481567383,
+          "per_step_ms": 0.24339540481567382,
+          "parity_max_abs_state": 2.86102294921875e-06,
+          "parity_max_abs_output": 1.1920928955078125e-06,
+          "parity_max_rel_state": 1.6093254089355469e-06,
+          "parity_max_rel_output": 7.152557373046875e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 24.420379638671875,
+          "per_step_ms": 0.24420379638671874,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 1.3113021850585938e-06,
+          "parity_max_rel_output": 9.447614957025507e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 24.22800064086914,
+          "per_step_ms": 0.2422800064086914,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 1.1324882507324219e-06,
+          "parity_max_rel_output": 7.285272545232147e-07,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 24.329306920369465,
+          "median": 24.339540481567383,
+          "min": 24.22800064086914,
+          "max": 24.420379638671875,
+          "stdev": 0.07887105100516813
+        },
+        "per_step_ms": {
+          "mean": 0.24329306920369465,
+          "median": 0.24339540481567382,
+          "min": 0.2422800064086914,
+          "max": 0.24420379638671874,
+          "stdev": 0.0007887105100516773
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 3.814697265625e-06,
+        "max_abs_output": 2.86102294921875e-06,
+        "max_rel_state": 1.6093254089355469e-06,
+        "max_rel_output": 9.447614957025507e-07,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 1,
+      "shape": {
+        "state": [
+          1,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          1,
+          32,
+          64
+        ],
+        "kk": [
+          1,
+          32,
+          64
+        ],
+        "a": [
+          1,
+          32,
+          64
+        ],
+        "k": [
+          1,
+          32,
+          64
+        ],
+        "v": [
+          1,
+          32,
+          64
+        ],
+        "r": [
+          1,
+          32,
+          64
+        ],
+        "output": [
+          1,
+          32,
+          64
+        ],
+        "final_state": [
+          1,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 24.105159759521484,
+          "per_step_ms": 0.24105159759521486,
+          "parity_max_abs_state": 3.337860107421875e-06,
+          "parity_max_abs_output": 1.430511474609375e-06,
+          "parity_max_rel_state": 1.2218952178955078e-06,
+          "parity_max_rel_output": 8.344650268554688e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 24.123180389404297,
+          "per_step_ms": 0.24123180389404297,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 1.3113021850585938e-06,
+          "parity_max_rel_output": 1.0392376452728058e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 24.113500595092773,
+          "per_step_ms": 0.24113500595092774,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 1.8477439880371094e-06,
+          "parity_max_rel_output": 9.366778499497741e-07,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 24.11394691467285,
+          "median": 24.113500595092773,
+          "min": 24.105159759521484,
+          "max": 24.123180389404297,
+          "stdev": 0.007363657434499949
+        },
+        "per_step_ms": {
+          "mean": 0.24113946914672854,
+          "median": 0.24113500595092774,
+          "min": 0.24105159759521486,
+          "max": 0.24123180389404297,
+          "stdev": 7.363657434499639e-05
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 3.814697265625e-06,
+        "max_abs_output": 3.337860107421875e-06,
+        "max_rel_state": 1.8477439880371094e-06,
+        "max_rel_output": 1.0392376452728058e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 2,
+      "shape": {
+        "state": [
+          2,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          2,
+          32,
+          64
+        ],
+        "kk": [
+          2,
+          32,
+          64
+        ],
+        "a": [
+          2,
+          32,
+          64
+        ],
+        "k": [
+          2,
+          32,
+          64
+        ],
+        "v": [
+          2,
+          32,
+          64
+        ],
+        "r": [
+          2,
+          32,
+          64
+        ],
+        "output": [
+          2,
+          32,
+          64
+        ],
+        "final_state": [
+          2,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 31.35650062561035,
+          "per_step_ms": 0.3135650062561035,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 31.47492027282715,
+          "per_step_ms": 0.3147492027282715,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 32.579898834228516,
+          "per_step_ms": 0.32579898834228516,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 31.803773244222004,
+          "median": 31.47492027282715,
+          "min": 31.35650062561035,
+          "max": 32.579898834228516,
+          "stdev": 0.5509289136291863
+        },
+        "per_step_ms": {
+          "mean": 0.31803773244222006,
+          "median": 0.3147492027282715,
+          "min": 0.3135650062561035,
+          "max": 0.32579898834228516,
+          "stdev": 0.005509289136291861
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 2,
+      "shape": {
+        "state": [
+          2,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          2,
+          32,
+          64
+        ],
+        "kk": [
+          2,
+          32,
+          64
+        ],
+        "a": [
+          2,
+          32,
+          64
+        ],
+        "k": [
+          2,
+          32,
+          64
+        ],
+        "v": [
+          2,
+          32,
+          64
+        ],
+        "r": [
+          2,
+          32,
+          64
+        ],
+        "output": [
+          2,
+          32,
+          64
+        ],
+        "final_state": [
+          2,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 23.367399215698242,
+          "per_step_ms": 0.23367399215698242,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 1.1920928955078125e-06,
+          "parity_max_rel_state": 1.6093254089355469e-06,
+          "parity_max_rel_output": 7.152557373046875e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 23.57394027709961,
+          "per_step_ms": 0.2357394027709961,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 1.3113021850585938e-06,
+          "parity_max_rel_output": 9.447614957025507e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 23.390100479125977,
+          "per_step_ms": 0.23390100479125978,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.6226043701171875e-06,
+          "parity_max_rel_output": 1.0132789611816406e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 23.44381332397461,
+          "median": 23.390100479125977,
+          "min": 23.367399215698242,
+          "max": 23.57394027709961,
+          "stdev": 0.09247920410377246
+        },
+        "per_step_ms": {
+          "mean": 0.23443813323974608,
+          "median": 0.23390100479125978,
+          "min": 0.23367399215698242,
+          "max": 0.2357394027709961,
+          "stdev": 0.0009247920410377189
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 5.7220458984375e-06,
+        "max_abs_output": 2.86102294921875e-06,
+        "max_rel_state": 2.6226043701171875e-06,
+        "max_rel_output": 1.0132789611816406e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 2,
+      "shape": {
+        "state": [
+          2,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          2,
+          32,
+          64
+        ],
+        "kk": [
+          2,
+          32,
+          64
+        ],
+        "a": [
+          2,
+          32,
+          64
+        ],
+        "k": [
+          2,
+          32,
+          64
+        ],
+        "v": [
+          2,
+          32,
+          64
+        ],
+        "r": [
+          2,
+          32,
+          64
+        ],
+        "output": [
+          2,
+          32,
+          64
+        ],
+        "final_state": [
+          2,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 47.819480895996094,
+          "per_step_ms": 0.4781948089599609,
+          "parity_max_abs_state": 3.337860107421875e-06,
+          "parity_max_abs_output": 1.430511474609375e-06,
+          "parity_max_rel_state": 1.2218952178955078e-06,
+          "parity_max_rel_output": 8.344650268554688e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 47.84120178222656,
+          "per_step_ms": 0.4784120178222656,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 1.7204326923092594e-06,
+          "parity_max_rel_output": 1.0392376452728058e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 47.81996154785156,
+          "per_step_ms": 0.47819961547851564,
+          "parity_max_abs_state": 3.814697265625e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.086162567138672e-06,
+          "parity_max_rel_output": 9.366778499497741e-07,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 47.826881408691406,
+          "median": 47.81996154785156,
+          "min": 47.819480895996094,
+          "max": 47.84120178222656,
+          "stdev": 0.010127934313614795
+        },
+        "per_step_ms": {
+          "mean": 0.4782688140869141,
+          "median": 0.47819961547851564,
+          "min": 0.4781948089599609,
+          "max": 0.4784120178222656,
+          "stdev": 0.00010127934313614405
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 5.7220458984375e-06,
+        "max_abs_output": 3.337860107421875e-06,
+        "max_rel_state": 2.086162567138672e-06,
+        "max_rel_output": 1.0392376452728058e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 8,
+      "shape": {
+        "state": [
+          8,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          8,
+          32,
+          64
+        ],
+        "kk": [
+          8,
+          32,
+          64
+        ],
+        "a": [
+          8,
+          32,
+          64
+        ],
+        "k": [
+          8,
+          32,
+          64
+        ],
+        "v": [
+          8,
+          32,
+          64
+        ],
+        "r": [
+          8,
+          32,
+          64
+        ],
+        "output": [
+          8,
+          32,
+          64
+        ],
+        "final_state": [
+          8,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 31.752479553222656,
+          "per_step_ms": 0.31752479553222657,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 31.494579315185547,
+          "per_step_ms": 0.31494579315185545,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 32.34537887573242,
+          "per_step_ms": 0.3234537887573242,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 31.864145914713543,
+          "median": 31.752479553222656,
+          "min": 31.494579315185547,
+          "max": 32.34537887573242,
+          "stdev": 0.3561993873035613
+        },
+        "per_step_ms": {
+          "mean": 0.31864145914713543,
+          "median": 0.31752479553222657,
+          "min": 0.31494579315185545,
+          "max": 0.3234537887573242,
+          "stdev": 0.0035619938730356224
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 8,
+      "shape": {
+        "state": [
+          8,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          8,
+          32,
+          64
+        ],
+        "kk": [
+          8,
+          32,
+          64
+        ],
+        "a": [
+          8,
+          32,
+          64
+        ],
+        "k": [
+          8,
+          32,
+          64
+        ],
+        "v": [
+          8,
+          32,
+          64
+        ],
+        "r": [
+          8,
+          32,
+          64
+        ],
+        "output": [
+          8,
+          32,
+          64
+        ],
+        "final_state": [
+          8,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 23.9307804107666,
+          "per_step_ms": 0.23930780410766603,
+          "parity_max_abs_state": 4.76837158203125e-06,
+          "parity_max_abs_output": 1.9073486328125e-06,
+          "parity_max_rel_state": 1.7285346984863281e-06,
+          "parity_max_rel_output": 8.843647947287536e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 23.925479888916016,
+          "per_step_ms": 0.23925479888916015,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 2.1457672119140625e-06,
+          "parity_max_rel_output": 1.137318577093538e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 24.002880096435547,
+          "per_step_ms": 0.24002880096435547,
+          "parity_max_abs_state": 4.76837158203125e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.6226043701171875e-06,
+          "parity_max_rel_output": 1.0132789611816406e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 23.953046798706055,
+          "median": 23.9307804107666,
+          "min": 23.925479888916016,
+          "max": 24.002880096435547,
+          "stdev": 0.0353038435576949
+        },
+        "per_step_ms": {
+          "mean": 0.23953046798706054,
+          "median": 0.23930780410766603,
+          "min": 0.23925479888916015,
+          "max": 0.24002880096435547,
+          "stdev": 0.00035303843557694833
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 5.7220458984375e-06,
+        "max_abs_output": 2.86102294921875e-06,
+        "max_rel_state": 2.6226043701171875e-06,
+        "max_rel_output": 1.137318577093538e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 8,
+      "shape": {
+        "state": [
+          8,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          8,
+          32,
+          64
+        ],
+        "kk": [
+          8,
+          32,
+          64
+        ],
+        "a": [
+          8,
+          32,
+          64
+        ],
+        "k": [
+          8,
+          32,
+          64
+        ],
+        "v": [
+          8,
+          32,
+          64
+        ],
+        "r": [
+          8,
+          32,
+          64
+        ],
+        "output": [
+          8,
+          32,
+          64
+        ],
+        "final_state": [
+          8,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 165.2970428466797,
+          "per_step_ms": 1.652970428466797,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 1.9073486328125e-06,
+          "parity_max_rel_state": 2.1457672119140625e-06,
+          "parity_max_rel_output": 1.0132789611816406e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 165.27554321289062,
+          "per_step_ms": 1.6527554321289062,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 2.7418136596679688e-06,
+          "parity_max_rel_output": 1.0392376452728058e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 165.29037475585938,
+          "per_step_ms": 1.6529037475585937,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.086162567138672e-06,
+          "parity_max_rel_output": 1.0459465329404338e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 165.28765360514322,
+          "median": 165.29037475585938,
+          "min": 165.27554321289062,
+          "max": 165.2970428466797,
+          "stdev": 0.008985620334027593
+        },
+        "per_step_ms": {
+          "mean": 1.6528765360514324,
+          "median": 1.6529037475585937,
+          "min": 1.6527554321289062,
+          "max": 1.652970428466797,
+          "stdev": 8.98562033403365e-05
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 7.62939453125e-06,
+        "max_abs_output": 3.337860107421875e-06,
+        "max_rel_state": 2.7418136596679688e-06,
+        "max_rel_output": 1.0459465329404338e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 16,
+      "shape": {
+        "state": [
+          16,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          16,
+          32,
+          64
+        ],
+        "kk": [
+          16,
+          32,
+          64
+        ],
+        "a": [
+          16,
+          32,
+          64
+        ],
+        "k": [
+          16,
+          32,
+          64
+        ],
+        "v": [
+          16,
+          32,
+          64
+        ],
+        "r": [
+          16,
+          32,
+          64
+        ],
+        "output": [
+          16,
+          32,
+          64
+        ],
+        "final_state": [
+          16,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 31.024200439453125,
+          "per_step_ms": 0.31024200439453126,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 31.241579055786133,
+          "per_step_ms": 0.31241579055786134,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 32.409278869628906,
+          "per_step_ms": 0.32409278869628905,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 31.558352788289387,
+          "median": 31.241579055786133,
+          "min": 31.024200439453125,
+          "max": 32.409278869628906,
+          "stdev": 0.6082048792074288
+        },
+        "per_step_ms": {
+          "mean": 0.31558352788289384,
+          "median": 0.31241579055786134,
+          "min": 0.31024200439453126,
+          "max": 0.32409278869628905,
+          "stdev": 0.0060820487920742764
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 16,
+      "shape": {
+        "state": [
+          16,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          16,
+          32,
+          64
+        ],
+        "kk": [
+          16,
+          32,
+          64
+        ],
+        "a": [
+          16,
+          32,
+          64
+        ],
+        "k": [
+          16,
+          32,
+          64
+        ],
+        "v": [
+          16,
+          32,
+          64
+        ],
+        "r": [
+          16,
+          32,
+          64
+        ],
+        "output": [
+          16,
+          32,
+          64
+        ],
+        "final_state": [
+          16,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 40.09421920776367,
+          "per_step_ms": 0.4009421920776367,
+          "parity_max_abs_state": 4.76837158203125e-06,
+          "parity_max_abs_output": 1.9073486328125e-06,
+          "parity_max_rel_state": 2.205371856689453e-06,
+          "parity_max_rel_output": 9.213433145305316e-07,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 40.08055877685547,
+          "per_step_ms": 0.4008055877685547,
+          "parity_max_abs_state": 6.67572021484375e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 2.1457672119140625e-06,
+          "parity_max_rel_output": 1.137318577093538e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 40.09320068359375,
+          "per_step_ms": 0.4009320068359375,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.6226043701171875e-06,
+          "parity_max_rel_output": 1.0132789611816406e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 40.08932622273763,
+          "median": 40.09320068359375,
+          "min": 40.08055877685547,
+          "max": 40.09421920776367,
+          "stdev": 0.0062134493020463925
+        },
+        "per_step_ms": {
+          "mean": 0.40089326222737626,
+          "median": 0.4009320068359375,
+          "min": 0.4008055877685547,
+          "max": 0.4009421920776367,
+          "stdev": 6.213449302046112e-05
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 6.67572021484375e-06,
+        "max_abs_output": 2.86102294921875e-06,
+        "max_rel_state": 2.6226043701171875e-06,
+        "max_rel_output": 1.137318577093538e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 16,
+      "shape": {
+        "state": [
+          16,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          16,
+          32,
+          64
+        ],
+        "kk": [
+          16,
+          32,
+          64
+        ],
+        "a": [
+          16,
+          32,
+          64
+        ],
+        "k": [
+          16,
+          32,
+          64
+        ],
+        "v": [
+          16,
+          32,
+          64
+        ],
+        "r": [
+          16,
+          32,
+          64
+        ],
+        "output": [
+          16,
+          32,
+          64
+        ],
+        "final_state": [
+          16,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 307.4368896484375,
+          "per_step_ms": 3.074368896484375,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 1.9073486328125e-06,
+          "parity_max_rel_state": 2.1457672119140625e-06,
+          "parity_max_rel_output": 1.0132789611816406e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 307.36248779296875,
+          "per_step_ms": 3.0736248779296873,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 2.7418136596679688e-06,
+          "parity_max_rel_output": 1.0587642691461951e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 307.3511962890625,
+          "per_step_ms": 3.073511962890625,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.384185791015625e-06,
+          "parity_max_rel_output": 1.0459465329404338e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 307.38352457682294,
+          "median": 307.36248779296875,
+          "min": 307.3511962890625,
+          "max": 307.4368896484375,
+          "stdev": 0.0380153273162148
+        },
+        "per_step_ms": {
+          "mean": 3.073835245768229,
+          "median": 3.0736248779296873,
+          "min": 3.073511962890625,
+          "max": 3.074368896484375,
+          "stdev": 0.0003801532731621893
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 7.62939453125e-06,
+        "max_abs_output": 3.337860107421875e-06,
+        "max_rel_state": 2.7418136596679688e-06,
+        "max_rel_output": 1.0587642691461951e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 32,
+      "shape": {
+        "state": [
+          32,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          32,
+          32,
+          64
+        ],
+        "kk": [
+          32,
+          32,
+          64
+        ],
+        "a": [
+          32,
+          32,
+          64
+        ],
+        "k": [
+          32,
+          32,
+          64
+        ],
+        "v": [
+          32,
+          32,
+          64
+        ],
+        "r": [
+          32,
+          32,
+          64
+        ],
+        "output": [
+          32,
+          32,
+          64
+        ],
+        "final_state": [
+          32,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 30.195579528808594,
+          "per_step_ms": 0.3019557952880859,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 31.83803939819336,
+          "per_step_ms": 0.3183803939819336,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 32.662078857421875,
+          "per_step_ms": 0.3266207885742187,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 31.56523259480794,
+          "median": 31.83803939819336,
+          "min": 30.195579528808594,
+          "max": 32.662078857421875,
+          "stdev": 1.0252552197680564
+        },
+        "per_step_ms": {
+          "mean": 0.3156523259480794,
+          "median": 0.3183803939819336,
+          "min": 0.3019557952880859,
+          "max": 0.3266207885742187,
+          "stdev": 0.010252552197680564
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 32,
+      "shape": {
+        "state": [
+          32,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          32,
+          32,
+          64
+        ],
+        "kk": [
+          32,
+          32,
+          64
+        ],
+        "a": [
+          32,
+          32,
+          64
+        ],
+        "k": [
+          32,
+          32,
+          64
+        ],
+        "v": [
+          32,
+          32,
+          64
+        ],
+        "r": [
+          32,
+          32,
+          64
+        ],
+        "output": [
+          32,
+          32,
+          64
+        ],
+        "final_state": [
+          32,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 78.7614974975586,
+          "per_step_ms": 0.787614974975586,
+          "parity_max_abs_state": 4.76837158203125e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 2.205371856689453e-06,
+          "parity_max_rel_output": 1.2515157550296863e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 78.72968292236328,
+          "per_step_ms": 0.7872968292236329,
+          "parity_max_abs_state": 6.67572021484375e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 2.9802322387695312e-06,
+          "parity_max_rel_output": 1.137318577093538e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 78.74604034423828,
+          "per_step_ms": 0.7874604034423828,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.6226043701171875e-06,
+          "parity_max_rel_output": 1.1473894119262695e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 78.74574025472005,
+          "median": 78.74604034423828,
+          "min": 78.72968292236328,
+          "max": 78.7614974975586,
+          "stdev": 0.012989979189199691
+        },
+        "per_step_ms": {
+          "mean": 0.7874574025472004,
+          "median": 0.7874604034423828,
+          "min": 0.7872968292236329,
+          "max": 0.787614974975586,
+          "stdev": 0.00012989979189198723
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 6.67572021484375e-06,
+        "max_abs_output": 2.86102294921875e-06,
+        "max_rel_state": 2.9802322387695312e-06,
+        "max_rel_output": 1.2515157550296863e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 32,
+      "shape": {
+        "state": [
+          32,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          32,
+          32,
+          64
+        ],
+        "kk": [
+          32,
+          32,
+          64
+        ],
+        "a": [
+          32,
+          32,
+          64
+        ],
+        "k": [
+          32,
+          32,
+          64
+        ],
+        "v": [
+          32,
+          32,
+          64
+        ],
+        "r": [
+          32,
+          32,
+          64
+        ],
+        "output": [
+          32,
+          32,
+          64
+        ],
+        "final_state": [
+          32,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 612.97216796875,
+          "per_step_ms": 6.1297216796875,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.592802047729492e-06,
+          "parity_max_rel_output": 1.1472227470221696e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 613.013427734375,
+          "per_step_ms": 6.13013427734375,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 2.7418136596679688e-06,
+          "parity_max_rel_output": 1.1324882507324219e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 612.961669921875,
+          "per_step_ms": 6.12961669921875,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 2.384185791015625e-06,
+          "parity_max_rel_state": 2.592802047729492e-06,
+          "parity_max_rel_output": 1.2516975402832031e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 612.982421875,
+          "median": 612.97216796875,
+          "min": 612.961669921875,
+          "max": 613.013427734375,
+          "stdev": 0.022339423056324005
+        },
+        "per_step_ms": {
+          "mean": 6.12982421875,
+          "median": 6.1297216796875,
+          "min": 6.12961669921875,
+          "max": 6.13013427734375,
+          "stdev": 0.00022339423056311412
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 7.62939453125e-06,
+        "max_abs_output": 3.337860107421875e-06,
+        "max_rel_state": 2.7418136596679688e-06,
+        "max_rel_output": 1.2516975402832031e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 64,
+      "shape": {
+        "state": [
+          64,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          64,
+          32,
+          64
+        ],
+        "kk": [
+          64,
+          32,
+          64
+        ],
+        "a": [
+          64,
+          32,
+          64
+        ],
+        "k": [
+          64,
+          32,
+          64
+        ],
+        "v": [
+          64,
+          32,
+          64
+        ],
+        "r": [
+          64,
+          32,
+          64
+        ],
+        "output": [
+          64,
+          32,
+          64
+        ],
+        "final_state": [
+          64,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 31.480459213256836,
+          "per_step_ms": 0.31480459213256834,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 31.47134017944336,
+          "per_step_ms": 0.3147134017944336,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 32.835880279541016,
+          "per_step_ms": 0.32835880279541013,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 31.929226557413738,
+          "median": 31.480459213256836,
+          "min": 31.47134017944336,
+          "max": 32.835880279541016,
+          "stdev": 0.6411118041235654
+        },
+        "per_step_ms": {
+          "mean": 0.3192922655741373,
+          "median": 0.31480459213256834,
+          "min": 0.3147134017944336,
+          "max": 0.32835880279541013,
+          "stdev": 0.006411118041235651
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 64,
+      "shape": {
+        "state": [
+          64,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          64,
+          32,
+          64
+        ],
+        "kk": [
+          64,
+          32,
+          64
+        ],
+        "a": [
+          64,
+          32,
+          64
+        ],
+        "k": [
+          64,
+          32,
+          64
+        ],
+        "v": [
+          64,
+          32,
+          64
+        ],
+        "r": [
+          64,
+          32,
+          64
+        ],
+        "output": [
+          64,
+          32,
+          64
+        ],
+        "final_state": [
+          64,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 154.63754272460938,
+          "per_step_ms": 1.5463754272460937,
+          "parity_max_abs_state": 5.7220458984375e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 2.9802322387695312e-06,
+          "parity_max_rel_output": 2.086162567138672e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 154.71067810058594,
+          "per_step_ms": 1.5471067810058594,
+          "parity_max_abs_state": 6.67572021484375e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 3.245626430725679e-06,
+          "parity_max_rel_output": 1.137318577093538e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 154.71426391601562,
+          "per_step_ms": 1.5471426391601562,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 2.6226043701171875e-06,
+          "parity_max_rel_output": 1.1473894119262695e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 154.68749491373697,
+          "median": 154.71067810058594,
+          "min": 154.63754272460938,
+          "max": 154.71426391601562,
+          "stdev": 0.03535185442617212
+        },
+        "per_step_ms": {
+          "mean": 1.5468749491373697,
+          "median": 1.5471067810058594,
+          "min": 1.5463754272460937,
+          "max": 1.5471426391601562,
+          "stdev": 0.000353518544261742
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 7.62939453125e-06,
+        "max_abs_output": 3.814697265625e-06,
+        "max_rel_state": 3.245626430725679e-06,
+        "max_rel_output": 2.086162567138672e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 64,
+      "shape": {
+        "state": [
+          64,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          64,
+          32,
+          64
+        ],
+        "kk": [
+          64,
+          32,
+          64
+        ],
+        "a": [
+          64,
+          32,
+          64
+        ],
+        "k": [
+          64,
+          32,
+          64
+        ],
+        "v": [
+          64,
+          32,
+          64
+        ],
+        "r": [
+          64,
+          32,
+          64
+        ],
+        "output": [
+          64,
+          32,
+          64
+        ],
+        "final_state": [
+          64,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 1221.2353515625,
+          "per_step_ms": 12.212353515625,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 4.76837158203125e-06,
+          "parity_max_rel_state": 3.039836883544922e-06,
+          "parity_max_rel_output": 1.464347519686271e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 1221.1397705078125,
+          "per_step_ms": 12.211397705078125,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 3.245626430725679e-06,
+          "parity_max_rel_output": 1.1324882507324219e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 1221.2130126953125,
+          "per_step_ms": 12.212130126953125,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 2.871252490876941e-06,
+          "parity_max_rel_output": 1.2516975402832031e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 1221.196044921875,
+          "median": 1221.2130126953125,
+          "min": 1221.1397705078125,
+          "max": 1221.2353515625,
+          "stdev": 0.04082371455713345
+        },
+        "per_step_ms": {
+          "mean": 12.21196044921875,
+          "median": 12.212130126953125,
+          "min": 12.211397705078125,
+          "max": 12.212353515625,
+          "stdev": 0.0004082371455714029
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 7.62939453125e-06,
+        "max_abs_output": 4.76837158203125e-06,
+        "max_rel_state": 3.245626430725679e-06,
+        "max_rel_output": 1.464347519686271e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 128,
+      "shape": {
+        "state": [
+          128,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          128,
+          32,
+          64
+        ],
+        "kk": [
+          128,
+          32,
+          64
+        ],
+        "a": [
+          128,
+          32,
+          64
+        ],
+        "k": [
+          128,
+          32,
+          64
+        ],
+        "v": [
+          128,
+          32,
+          64
+        ],
+        "r": [
+          128,
+          32,
+          64
+        ],
+        "output": [
+          128,
+          32,
+          64
+        ],
+        "final_state": [
+          128,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 53.17734146118164,
+          "per_step_ms": 0.5317734146118164,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 52.0501594543457,
+          "per_step_ms": 0.520501594543457,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 50.13460159301758,
+          "per_step_ms": 0.5013460159301758,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 51.787367502848305,
+          "median": 52.0501594543457,
+          "min": 50.13460159301758,
+          "max": 53.17734146118164,
+          "stdev": 1.2560151760382572
+        },
+        "per_step_ms": {
+          "mean": 0.517873675028483,
+          "median": 0.520501594543457,
+          "min": 0.5013460159301758,
+          "max": 0.5317734146118164,
+          "stdev": 0.012560151760382549
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 128,
+      "shape": {
+        "state": [
+          128,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          128,
+          32,
+          64
+        ],
+        "kk": [
+          128,
+          32,
+          64
+        ],
+        "a": [
+          128,
+          32,
+          64
+        ],
+        "k": [
+          128,
+          32,
+          64
+        ],
+        "v": [
+          128,
+          32,
+          64
+        ],
+        "r": [
+          128,
+          32,
+          64
+        ],
+        "output": [
+          128,
+          32,
+          64
+        ],
+        "final_state": [
+          128,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 306.3851318359375,
+          "per_step_ms": 3.063851318359375,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 3.337860107421875e-06,
+          "parity_max_rel_output": 2.086162567138672e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 306.46844482421875,
+          "per_step_ms": 3.0646844482421876,
+          "parity_max_abs_state": 8.58306884765625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 4.76837158203125e-06,
+          "parity_max_rel_output": 1.4901161193847656e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 306.7868347167969,
+          "per_step_ms": 3.067868347167969,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.337860107421875e-06,
+          "parity_max_rel_state": 3.248453140258789e-06,
+          "parity_max_rel_output": 1.1847556606880971e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 306.5468037923177,
+          "median": 306.46844482421875,
+          "min": 306.3851318359375,
+          "max": 306.7868347167969,
+          "stdev": 0.17310189106194168
+        },
+        "per_step_ms": {
+          "mean": 3.065468037923177,
+          "median": 3.0646844482421876,
+          "min": 3.063851318359375,
+          "max": 3.067868347167969,
+          "stdev": 0.0017310189106194691
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 8.58306884765625e-06,
+        "max_abs_output": 3.814697265625e-06,
+        "max_rel_state": 4.76837158203125e-06,
+        "max_rel_output": 2.086162567138672e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 128,
+      "shape": {
+        "state": [
+          128,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          128,
+          32,
+          64
+        ],
+        "kk": [
+          128,
+          32,
+          64
+        ],
+        "a": [
+          128,
+          32,
+          64
+        ],
+        "k": [
+          128,
+          32,
+          64
+        ],
+        "v": [
+          128,
+          32,
+          64
+        ],
+        "r": [
+          128,
+          32,
+          64
+        ],
+        "output": [
+          128,
+          32,
+          64
+        ],
+        "final_state": [
+          128,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 2423.6552734375,
+          "per_step_ms": 24.236552734375,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 4.76837158203125e-06,
+          "parity_max_rel_state": 3.2186508178710938e-06,
+          "parity_max_rel_output": 1.464347519686271e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 2423.653564453125,
+          "per_step_ms": 24.23653564453125,
+          "parity_max_abs_state": 8.58306884765625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 4.231929779052734e-06,
+          "parity_max_rel_output": 1.2814998626708984e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 2423.655029296875,
+          "per_step_ms": 24.23655029296875,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 2.86102294921875e-06,
+          "parity_max_rel_state": 2.9802322387695312e-06,
+          "parity_max_rel_output": 1.2516975402832031e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 2423.6546223958335,
+          "median": 2423.655029296875,
+          "min": 2423.653564453125,
+          "max": 2423.6552734375,
+          "stdev": 0.0007546890051672936
+        },
+        "per_step_ms": {
+          "mean": 24.23654622395833,
+          "median": 24.23655029296875,
+          "min": 24.23653564453125,
+          "max": 24.236552734375,
+          "stdev": 7.5468900510395456e-06
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 8.58306884765625e-06,
+        "max_abs_output": 4.76837158203125e-06,
+        "max_rel_state": 4.231929779052734e-06,
+        "max_rel_output": 1.464347519686271e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 256,
+      "shape": {
+        "state": [
+          256,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          256,
+          32,
+          64
+        ],
+        "kk": [
+          256,
+          32,
+          64
+        ],
+        "a": [
+          256,
+          32,
+          64
+        ],
+        "k": [
+          256,
+          32,
+          64
+        ],
+        "v": [
+          256,
+          32,
+          64
+        ],
+        "r": [
+          256,
+          32,
+          64
+        ],
+        "output": [
+          256,
+          32,
+          64
+        ],
+        "final_state": [
+          256,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 160.7818145751953,
+          "per_step_ms": 1.6078181457519531,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 160.68170166015625,
+          "per_step_ms": 1.6068170166015625,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 160.7858123779297,
+          "per_step_ms": 1.6078581237792968,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 160.7497762044271,
+          "median": 160.7818145751953,
+          "min": 160.68170166015625,
+          "max": 160.7858123779297,
+          "stdev": 0.04816363282212683
+        },
+        "per_step_ms": {
+          "mean": 1.6074977620442708,
+          "median": 1.6078181457519531,
+          "min": 1.6068170166015625,
+          "max": 1.6078581237792968,
+          "stdev": 0.0004816363282212548
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 256,
+      "shape": {
+        "state": [
+          256,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          256,
+          32,
+          64
+        ],
+        "kk": [
+          256,
+          32,
+          64
+        ],
+        "a": [
+          256,
+          32,
+          64
+        ],
+        "k": [
+          256,
+          32,
+          64
+        ],
+        "v": [
+          256,
+          32,
+          64
+        ],
+        "r": [
+          256,
+          32,
+          64
+        ],
+        "output": [
+          256,
+          32,
+          64
+        ],
+        "final_state": [
+          256,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 604.2448120117188,
+          "per_step_ms": 6.042448120117188,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 3.993511199951172e-06,
+          "parity_max_rel_output": 2.086162567138672e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 604.5326538085938,
+          "per_step_ms": 6.045326538085938,
+          "parity_max_abs_state": 8.58306884765625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 4.76837158203125e-06,
+          "parity_max_rel_output": 1.5663597423554165e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 604.261474609375,
+          "per_step_ms": 6.04261474609375,
+          "parity_max_abs_state": 1.1444091796875e-05,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 3.6954879760742188e-06,
+          "parity_max_rel_output": 1.4901161193847656e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 604.3463134765625,
+          "median": 604.261474609375,
+          "min": 604.2448120117188,
+          "max": 604.5326538085938,
+          "stdev": 0.13193799060240607
+        },
+        "per_step_ms": {
+          "mean": 6.0434631347656245,
+          "median": 6.04261474609375,
+          "min": 6.042448120117188,
+          "max": 6.045326538085938,
+          "stdev": 0.0013193799060242143
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 1.1444091796875e-05,
+        "max_abs_output": 3.814697265625e-06,
+        "max_rel_state": 4.76837158203125e-06,
+        "max_rel_output": 2.086162567138672e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 256,
+      "shape": {
+        "state": [
+          256,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          256,
+          32,
+          64
+        ],
+        "kk": [
+          256,
+          32,
+          64
+        ],
+        "a": [
+          256,
+          32,
+          64
+        ],
+        "k": [
+          256,
+          32,
+          64
+        ],
+        "v": [
+          256,
+          32,
+          64
+        ],
+        "r": [
+          256,
+          32,
+          64
+        ],
+        "output": [
+          256,
+          32,
+          64
+        ],
+        "final_state": [
+          256,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 4918.9296875,
+          "per_step_ms": 49.189296875,
+          "parity_max_abs_state": 7.62939453125e-06,
+          "parity_max_abs_output": 4.76837158203125e-06,
+          "parity_max_rel_state": 4.172325134277344e-06,
+          "parity_max_rel_output": 1.464347519686271e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 4920.2578125,
+          "per_step_ms": 49.202578125,
+          "parity_max_abs_state": 9.5367431640625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 4.231929779052734e-06,
+          "parity_max_rel_output": 1.3575117918662727e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 4919.55517578125,
+          "per_step_ms": 49.1955517578125,
+          "parity_max_abs_state": 9.5367431640625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 3.1722051971883047e-06,
+          "parity_max_rel_output": 1.3709068298339844e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 4919.580891927083,
+          "median": 4919.55517578125,
+          "min": 4918.9296875,
+          "max": 4920.2578125,
+          "stdev": 0.5425095968574448
+        },
+        "per_step_ms": {
+          "mean": 49.19580891927083,
+          "median": 49.1955517578125,
+          "min": 49.189296875,
+          "max": 49.202578125,
+          "stdev": 0.005425095968576718
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 9.5367431640625e-06,
+        "max_abs_output": 4.76837158203125e-06,
+        "max_rel_state": 4.231929779052734e-06,
+        "max_rel_output": 1.464347519686271e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "torch_reference",
+      "batch_size": 512,
+      "shape": {
+        "state": [
+          512,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          512,
+          32,
+          64
+        ],
+        "kk": [
+          512,
+          32,
+          64
+        ],
+        "a": [
+          512,
+          32,
+          64
+        ],
+        "k": [
+          512,
+          32,
+          64
+        ],
+        "v": [
+          512,
+          32,
+          64
+        ],
+        "r": [
+          512,
+          32,
+          64
+        ],
+        "output": [
+          512,
+          32,
+          64
+        ],
+        "final_state": [
+          512,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 377.654541015625,
+          "per_step_ms": 3.77654541015625,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 373.34906005859375,
+          "per_step_ms": 3.7334906005859376,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 378.39691162109375,
+          "per_step_ms": 3.7839691162109377,
+          "parity_max_abs_state": 0.0,
+          "parity_max_abs_output": 0.0,
+          "parity_max_rel_state": 0.0,
+          "parity_max_rel_output": 0.0,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 376.4668375651042,
+          "median": 377.654541015625,
+          "min": 373.34906005859375,
+          "max": 378.39691162109375,
+          "stdev": 2.22533607410098
+        },
+        "per_step_ms": {
+          "mean": 3.7646683756510417,
+          "median": 3.77654541015625,
+          "min": 3.7334906005859376,
+          "max": 3.7839691162109377,
+          "stdev": 0.022253360741009774
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 0.0,
+        "max_abs_output": 0.0,
+        "max_rel_state": 0.0,
+        "max_rel_output": 0.0,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "triton_t1",
+      "batch_size": 512,
+      "shape": {
+        "state": [
+          512,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          512,
+          32,
+          64
+        ],
+        "kk": [
+          512,
+          32,
+          64
+        ],
+        "a": [
+          512,
+          32,
+          64
+        ],
+        "k": [
+          512,
+          32,
+          64
+        ],
+        "v": [
+          512,
+          32,
+          64
+        ],
+        "r": [
+          512,
+          32,
+          64
+        ],
+        "output": [
+          512,
+          32,
+          64
+        ],
+        "final_state": [
+          512,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 1207.6466064453125,
+          "per_step_ms": 12.076466064453125,
+          "parity_max_abs_state": 1.049041748046875e-05,
+          "parity_max_abs_output": 4.76837158203125e-06,
+          "parity_max_rel_state": 3.993511199951172e-06,
+          "parity_max_rel_output": 2.086162567138672e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 1208.203125,
+          "per_step_ms": 12.08203125,
+          "parity_max_abs_state": 9.5367431640625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 4.76837158203125e-06,
+          "parity_max_rel_output": 1.5663597423554165e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 1207.5828857421875,
+          "per_step_ms": 12.075828857421875,
+          "parity_max_abs_state": 1.1444091796875e-05,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 3.6954879760742188e-06,
+          "parity_max_rel_output": 1.4901161193847656e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 1207.8108723958333,
+          "median": 1207.6466064453125,
+          "min": 1207.5828857421875,
+          "max": 1208.203125,
+          "stdev": 0.278581718840672
+        },
+        "per_step_ms": {
+          "mean": 12.078108723958332,
+          "median": 12.076466064453125,
+          "min": 12.075828857421875,
+          "max": 12.08203125,
+          "stdev": 0.002785817188406559
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 1.1444091796875e-05,
+        "max_abs_output": 4.76837158203125e-06,
+        "max_rel_state": 4.76837158203125e-06,
+        "max_rel_output": 2.086162567138672e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    },
+    {
+      "backend": "ascendc_alt_recurrent",
+      "batch_size": 512,
+      "shape": {
+        "state": [
+          512,
+          32,
+          64,
+          64
+        ],
+        "w": [
+          512,
+          32,
+          64
+        ],
+        "kk": [
+          512,
+          32,
+          64
+        ],
+        "a": [
+          512,
+          32,
+          64
+        ],
+        "k": [
+          512,
+          32,
+          64
+        ],
+        "v": [
+          512,
+          32,
+          64
+        ],
+        "r": [
+          512,
+          32,
+          64
+        ],
+        "output": [
+          512,
+          32,
+          64
+        ],
+        "final_state": [
+          512,
+          32,
+          64,
+          64
+        ]
+      },
+      "repetitions": [
+        {
+          "rep": 0,
+          "seed": 12345,
+          "elapsed_ms": 9829.0361328125,
+          "per_step_ms": 98.290361328125,
+          "parity_max_abs_state": 1.049041748046875e-05,
+          "parity_max_abs_output": 4.76837158203125e-06,
+          "parity_max_rel_state": 4.172325134277344e-06,
+          "parity_max_rel_output": 1.464347519686271e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 1,
+          "seed": 13354,
+          "elapsed_ms": 9828.673828125,
+          "per_step_ms": 98.28673828125,
+          "parity_max_abs_state": 9.5367431640625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 4.231929779052734e-06,
+          "parity_max_rel_output": 1.4185817462930572e-06,
+          "parity_passed": true
+        },
+        {
+          "rep": 2,
+          "seed": 14363,
+          "elapsed_ms": 9828.9775390625,
+          "per_step_ms": 98.289775390625,
+          "parity_max_abs_state": 9.5367431640625e-06,
+          "parity_max_abs_output": 3.814697265625e-06,
+          "parity_max_rel_state": 3.1722051971883047e-06,
+          "parity_max_rel_output": 1.6093254089355469e-06,
+          "parity_passed": true
+        }
+      ],
+      "aggregate": {
+        "elapsed_ms": {
+          "mean": 9828.895833333334,
+          "median": 9828.9775390625,
+          "min": 9828.673828125,
+          "max": 9829.0361328125,
+          "stdev": 0.15879345343372037
+        },
+        "per_step_ms": {
+          "mean": 98.28895833333333,
+          "median": 98.289775390625,
+          "min": 98.28673828125,
+          "max": 98.290361328125,
+          "stdev": 0.0015879345343391426
+        }
+      },
+      "parity": {
+        "atol": 0.0002,
+        "rtol": 0.0002,
+        "max_abs_state": 1.049041748046875e-05,
+        "max_abs_output": 4.76837158203125e-06,
+        "max_rel_state": 4.231929779052734e-06,
+        "max_rel_output": 1.6093254089355469e-06,
+        "passed": true,
+        "tolerance_check": "max_abs_output <= 0.0002 + 0.0002 * max|ref_out| per rep"
+      }
+    }
+  ],
+  "wall_clock_seconds": 90.45
+}
