@@ -388,7 +388,12 @@ def _patch_rwkv7_recurrent_scan():
                     initial_state_npu,
                 )
                 dispatch_hit(DispatchKind.RECURRENT_SCAN)
-                return output.squeeze(0), final_state.squeeze(0).transpose(-1, -2)
+                # AscendC returns final_state in [B, H, D, V]-semantic
+                # layout already (verified against the FP32 torch
+                # reference); do not transpose here.  Earlier
+                # versions transposed assuming [B, H, V, D] native
+                # layout, which silently corrupted the state.
+                return output.squeeze(0), final_state.squeeze(0)
             except Exception:
                 dispatch_fallback(DispatchKind.RECURRENT_SCAN, "alt_kernel_exception")
 
