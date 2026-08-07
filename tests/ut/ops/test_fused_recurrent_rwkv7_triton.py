@@ -252,13 +252,13 @@ class TestRWKV7RecurrentT1(unittest.TestCase):
             rwkv7_recurrent_t1,
         )
         H, D, V = 4, 16, 32
-        state = torch.randn(H, D, V, dtype=torch.float32)
-        w = torch.randn(H, D, dtype=torch.float32)
-        kk = torch.randn(H, D, dtype=torch.float32)
-        a = torch.randn(H, D, dtype=torch.float32)
-        k = torch.randn(H, D, dtype=torch.float32)
-        v = torch.randn(H, V, dtype=torch.float32)
-        r = torch.randn(H, D, dtype=torch.float32)
+        state = torch.randn(1, H, D, V, dtype=torch.float32)
+        w = torch.randn(1, H, D, dtype=torch.float32)
+        kk = torch.randn(1, H, D, dtype=torch.float32)
+        a = torch.randn(1, H, D, dtype=torch.float32)
+        k = torch.randn(1, H, D, dtype=torch.float32)
+        v = torch.randn(1, H, V, dtype=torch.float32)
+        r = torch.randn(1, H, D, dtype=torch.float32)
 
         ref_state, ref_out = _rwkv7_recurrent_t1_reference(state, w, kk, a, k, v, r)
         got_state, got_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)
@@ -272,13 +272,13 @@ class TestRWKV7RecurrentT1(unittest.TestCase):
             rwkv7_recurrent_t1,
         )
         H, D, V = 4, 16, 32
-        state = torch.randn(H, D, V, dtype=torch.bfloat16)
-        w = torch.randn(H, D, dtype=torch.bfloat16)
-        kk = torch.randn(H, D, dtype=torch.bfloat16)
-        a = torch.randn(H, D, dtype=torch.bfloat16)
-        k = torch.randn(H, D, dtype=torch.bfloat16)
-        v = torch.randn(H, V, dtype=torch.bfloat16)
-        r = torch.randn(H, D, dtype=torch.bfloat16)
+        state = torch.randn(1, H, D, V, dtype=torch.bfloat16)
+        w = torch.randn(1, H, D, dtype=torch.bfloat16)
+        kk = torch.randn(1, H, D, dtype=torch.bfloat16)
+        a = torch.randn(1, H, D, dtype=torch.bfloat16)
+        k = torch.randn(1, H, D, dtype=torch.bfloat16)
+        v = torch.randn(1, H, V, dtype=torch.bfloat16)
+        r = torch.randn(1, H, D, dtype=torch.bfloat16)
 
         # Must not crash (falls back to fp32 ref via guard)
         new_state, reduce_out = rwkv7_recurrent_t1(state, w, kk, a, k, v, r)

@@ -139,13 +139,18 @@ def rwkv7_recurrent_t1(
     """Fused T=1 recurrent step + reduce; returns (new_state, reduce_out).
 
     Falls back to the pure PyTorch reference when guards fail. Guards:
+      - recurrent state is rank 4: [B, H, D, V]
       - Triton available
       - device is NPU/CUDA
       - all inputs float32, contiguous, on the same device
-      - shapes match [B, H, D, V], [B, H, D], [B, H, V], or their rank-3
-        unbatched equivalents
+      - shapes match [B, H, D, V], [B, H, D], and [B, H, V]
       - head_dim and BLOCK_V fit within Triton power-of-two
     """
+    if recurrent_state.ndim != 4:
+        raise ValueError(
+            "rwkv7_recurrent_t1 expects recurrent_state with rank-4 shape [B, H, D, V]"
+        )
+
     if (
         not HAS_TRITON
         or envs.VLLM_ASCEND_RWKV7_DISABLE_TRITON
@@ -169,29 +174,14 @@ def rwkv7_recurrent_t1(
             recurrent_state, w, kk, a, k, v, r
         )
 
-    if recurrent_state.ndim == 3:
-        is_batched = False
-        state_4d = recurrent_state.unsqueeze(0)
-        w_3d, kk_3d, a_3d, k_3d, v_3d, r_3d = (
-            tensor.unsqueeze(0) for tensor in (w, kk, a, k, v, r)
-        )
-    elif recurrent_state.ndim == 4:
-        is_batched = True
-        state_4d = recurrent_state
-        w_3d, kk_3d, a_3d, k_3d, v_3d, r_3d = w, kk, a, k, v, r
-    else:
-        return _rwkv7_recurrent_t1_reference(
-            recurrent_state, w, kk, a, k, v, r
-        )
-
-    B, H, D, V = state_4d.shape
+    B, H, D, V = recurrent_state.shape
     if (
-        w_3d.shape != (B, H, D)
-        or kk_3d.shape != (B, H, D)
-        or a_3d.shape != (B, H, D)
-        or k_3d.shape != (B, H, D)
-        or v_3d.shape != (B, H, V)
-        or r_3d.shape != (B, H, D)
+        w.shape != (B, H, D)
+        or kk.shape != (B, H, D)
+        or a.shape != (B, H, D)
+        or k.shape != (B, H, D)
+        or v.shape != (B, H, V)
+        or r.shape != (B, H, D)
     ):
         return _rwkv7_recurrent_t1_reference(
             recurrent_state, w, kk, a, k, v, r
@@ -203,20 +193,20 @@ def rwkv7_recurrent_t1(
             recurrent_state, w, kk, a, k, v, r
         )
 
-    new_state = torch.empty_like(state_4d)
+    new_state = torch.empty_like(recurrent_state)
     reduce_out = torch.empty(
         (B, H, V), device=recurrent_state.device, dtype=torch.float32
     )
 
     grid = (B, H, triton.cdiv(V, BLOCK_V))
     _rwkv7_recurrent_t1_fwd_kernel[grid](
-        state_4d,
-        w_3d,
-        kk_3d,
-        a_3d,
-        k_3d,
-        v_3d,
-        r_3d,
+        recurrent_state,
+        w,
+        kk,
+        a,
+        k,
+        v,
+        r,
         new_state,
         reduce_out,
         H=H,
@@ -226,6 +216,4 @@ def rwkv7_recurrent_t1(
         num_warps=4 if BLOCK_V <= 64 else 8,
     )
     dispatch_hit(DispatchKind.RECURRENT_T1)
-    if is_batched:
-        return new_state, reduce_out
-    return new_state.squeeze(0), reduce_out.squeeze(0)
+    return new_state, reduce_out

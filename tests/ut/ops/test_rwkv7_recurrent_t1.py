@@ -68,29 +68,6 @@ def test_rank4_cpu_wrapper_matches_reference() -> None:
     assert actual_output.shape == (4, 2, 8)
 
 
-def test_rank3_cpu_wrapper_remains_compatible() -> None:
-    state, w, kk, a, k, value, r = _make_t1_inputs(1)
-    rank3_inputs = (
-        state.squeeze(0),
-        w.squeeze(0),
-        kk.squeeze(0),
-        a.squeeze(0),
-        k.squeeze(0),
-        value.squeeze(0),
-        r.squeeze(0),
-    )
-
-    actual_state, actual_output = recurrent_t1.rwkv7_recurrent_t1(*rank3_inputs)
-
-    assert actual_state.shape == (2, 8, 8)
-    assert actual_output.shape == (2, 8)
-    expected_state, expected_output = recurrent_t1._rwkv7_recurrent_t1_reference(
-        *rank3_inputs
-    )
-    torch.testing.assert_close(actual_state, expected_state)
-    torch.testing.assert_close(actual_output, expected_output)
-
-
 @pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 16, 32, 48, 64, 96, 128])
 def test_npu_rank4_batch_launch_does_not_fallback(batch_size: int) -> None:
     if not torch.npu.is_available() or not recurrent_t1.HAS_TRITON:
