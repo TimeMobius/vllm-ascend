@@ -116,3 +116,65 @@ def test_npu_rank4_parity_with_reference() -> None:
 
     torch.testing.assert_close(actual_state, expected_state, atol=2e-4, rtol=2e-4)
     torch.testing.assert_close(actual_output, expected_output, atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 16, 32, 64])
+def test_npu_t1_fp32_matches_reference_through_batch_64(batch_size: int) -> None:
+    if not torch.npu.is_available() or not recurrent_t1.HAS_TRITON:
+        pytest.skip("requires an NPU with Triton-Ascend")
+
+    inputs = _make_t1_inputs(
+        batch_size,
+        heads=32,
+        head_dim=64,
+        value_dim=64,
+        device="npu",
+    )
+    expected_state, expected_output = recurrent_t1._rwkv7_recurrent_t1_reference(
+        *inputs
+    )
+    actual_state, actual_output = recurrent_t1.rwkv7_recurrent_t1(*inputs)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(actual_state, expected_state, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(actual_output, expected_output, atol=2e-4, rtol=2e-4)
+
+
+def _timed_t1_latency_us(step_fn, inputs: tuple[torch.Tensor, ...]) -> float:
+    state, *projections = inputs
+    warmup_state = state.clone()
+    for _ in range(20):
+        warmup_state, _ = step_fn(warmup_state, *projections)
+    torch.npu.synchronize()
+
+    timed_state = state.clone()
+    start_event = torch.npu.Event(enable_timing=True)
+    end_event = torch.npu.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(100):
+        timed_state, _ = step_fn(timed_state, *projections)
+    end_event.record()
+    torch.npu.synchronize()
+    return float(start_event.elapsed_time(end_event)) * 10
+
+
+def test_npu_t1_batch_32_outperforms_torch_reference() -> None:
+    if not torch.npu.is_available() or not recurrent_t1.HAS_TRITON:
+        pytest.skip("requires an NPU with Triton-Ascend")
+
+    inputs = _make_t1_inputs(
+        32,
+        heads=32,
+        head_dim=64,
+        value_dim=64,
+        device="npu",
+    )
+    torch_reference_latency_us = _timed_t1_latency_us(
+        recurrent_t1._rwkv7_recurrent_t1_reference, inputs
+    )
+    triton_latency_us = _timed_t1_latency_us(recurrent_t1.rwkv7_recurrent_t1, inputs)
+
+    assert triton_latency_us < torch_reference_latency_us, (
+        f"Triton T1 {triton_latency_us:.2f}us must beat the Torch reference "
+        f"{torch_reference_latency_us:.2f}us at B=32"
+    )

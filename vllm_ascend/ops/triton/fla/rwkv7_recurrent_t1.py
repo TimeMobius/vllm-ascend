@@ -25,6 +25,11 @@ from vllm_ascend.profiler.rwkv7_counters import (
     dispatch_hit,
 )
 
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1_matrix import (
+        rwkv7_recurrent_t1_matrix_fwd_kernel,
+    )
+
 
 def _rwkv7_recurrent_t1_reference(
     recurrent_state: torch.Tensor,
@@ -198,22 +203,39 @@ def rwkv7_recurrent_t1(
         (B, H, V), device=recurrent_state.device, dtype=torch.float32
     )
 
-    grid = (B, H, triton.cdiv(V, BLOCK_V))
-    _rwkv7_recurrent_t1_fwd_kernel[grid](
-        recurrent_state,
-        w,
-        kk,
-        a,
-        k,
-        v,
-        r,
-        new_state,
-        reduce_out,
-        H=H,
-        D=D,
-        V=V,
-        BLOCK_V=BLOCK_V,
-        num_warps=4 if BLOCK_V <= 64 else 8,
-    )
+    if D == 64 and V == 64:
+        rwkv7_recurrent_t1_matrix_fwd_kernel[(B, H)](
+            recurrent_state,
+            w,
+            kk,
+            a,
+            k,
+            v,
+            r,
+            new_state,
+            reduce_out,
+            H=H,
+            D=D,
+            V=V,
+            num_warps=4,
+        )
+    else:
+        grid = (B, H, triton.cdiv(V, BLOCK_V))
+        _rwkv7_recurrent_t1_fwd_kernel[grid](
+            recurrent_state,
+            w,
+            kk,
+            a,
+            k,
+            v,
+            r,
+            new_state,
+            reduce_out,
+            H=H,
+            D=D,
+            V=V,
+            BLOCK_V=BLOCK_V,
+            num_warps=4 if BLOCK_V <= 64 else 8,
+        )
     dispatch_hit(DispatchKind.RECURRENT_T1)
     return new_state, reduce_out
