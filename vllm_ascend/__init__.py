@@ -42,7 +42,7 @@ def register():
 
 
 def register_rwkv() -> None:
-    from . import reasoning, tool_parsers  # noqa: F401
+    from . import reasoning, renderers, tokenizers, tool_parsers  # noqa: F401
 
 
 def register_connector():
