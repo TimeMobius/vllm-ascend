@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only RWKV7 model."""
 
+import re
 from collections.abc import Iterable
 from itertools import islice
-import re
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers.activations import ACT2FN as HF_ACT2FN
-
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
@@ -42,20 +41,19 @@ from vllm.model_executor.models.interfaces import (
     SupportsMambaPrefixCaching,
     SupportsPP,
 )
-from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-
-from vllm_ascend.ops.triton.fla import fused_recurrent_rwkv7
-from vllm_ascend import envs
-
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     make_layers,
     maybe_prefix,
 )
+from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+from vllm_ascend import envs
+from vllm_ascend.ops.triton.fla import fused_recurrent_rwkv7
 
 LOG_DECAY_SCALE = -0.6065306597126334
 RWKV7_RUNTIME_DTYPE = torch.float32
@@ -457,10 +455,6 @@ direct_register_custom_op(
         "v_first_out",
     ],
     fake_impl=rwkv7_attention_fake,
-    # These wrappers are only exercised on CUDA tensors. Register them
-    # explicitly on the CUDA dispatch key so they remain available even when
-    # current_platform resolves to an unspecified/CPU platform in test envs.
-    dispatch_key="CUDA",
 )
 
 
@@ -496,7 +490,6 @@ direct_register_custom_op(
     op_func=rwkv7_block_forward,
     mutates_args=["output", "v_first_out"],
     fake_impl=rwkv7_block_forward_fake,
-    dispatch_key="CUDA",
 )
 
 
@@ -1016,12 +1009,16 @@ class RWKV7Attention(nn.Module):
         recurrent_state: torch.Tensor | None,
         v_first: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self._forward(
-            hidden_states,
-            cached_shift_state,
-            recurrent_state,
-            v_first,
-        )
+        # Route through the registered custom op on NPU so the FULL
+        # cudagraph capture can build a single static subgraph per RWKV7
+        # attention block. CPU/eager paths keep the existing call.
+        if not is_forward_context_available() or hidden_states.device.type != "npu":
+            return self._forward(
+                hidden_states,
+                cached_shift_state,
+                recurrent_state,
+                v_first,
+            )
 
         output = hidden_states.new_empty(hidden_states.shape[0], self.hidden_size)
         final_shift_state = hidden_states.new_empty(
@@ -1834,13 +1831,22 @@ class RWKV7Block(nn.Module, MambaBase):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._forward_runtime(
-            hidden_states,
-            v_first,
-            output,
-            v_first_out,
-            attn_metadata=attn_metadata,
-        )
+        if is_forward_context_available() and hidden_states.device.type == "npu":
+            torch.ops.vllm.rwkv7_block_forward(
+                hidden_states,
+                _custom_op_optional_tensor(v_first, like=hidden_states),
+                output,
+                v_first_out,
+                self.prefix,
+            )
+        else:
+            self._forward_runtime(
+                hidden_states,
+                v_first,
+                output,
+                v_first_out,
+                attn_metadata=attn_metadata,
+            )
         return output, v_first_out
 
 
