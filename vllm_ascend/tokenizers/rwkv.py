@@ -1,48 +1,96 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""RWKV tokenizer for vLLM Ascend.
+
+Aligned with the upstream vLLM ``vllm/tokenizers/rwkv.py`` so that:
+
+* HF-style ``tokenizer_config.json`` (``bos_token`` / ``eos_token`` /
+  ``pad_token`` / ``added_tokens_decoder`` / ``chat_template``) is loaded
+  the same way as the upstream plugin.
+* A standalone ``chat_template.jinja`` next to the vocab txt is picked up
+  automatically when ``tokenizer_config.json`` does not ship one.
+* ``apply_chat_template`` honours a caller-provided jinja string, falls
+  back to the legacy role-prefix rendering on jinja failure, and
+  ultimately uses ``metadata["chat_template"]``.
+* ``<|im_end|>`` / ``<|endoftext|>`` etc. can be promoted to special
+  tokens with the IDs declared in the HF metadata; native vocab control
+  markers stay in the legacy whole-string trie path.
+"""
+
 from __future__ import annotations
 
 import json
-import re
 from ast import literal_eval
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast, overload
 
+import regex as re
 from transformers import BatchEncoding
-
+from transformers.utils import chat_template_utils as hf_chat_utils
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
+
+try:
+    from pyrwkv_tokenizer import WorldTokenizer as FastWorldTokenizer
+except ImportError:
+    FastWorldTokenizer = None
+
+
+logger = init_logger(__name__)
 
 
 class _TrieNode:
+    __slots__ = ("children", "values")
+
     def __init__(self) -> None:
-        self.children: dict[int, _TrieNode] = {}
-        self.values: list[tuple[bytes, int]] = []
+        self.children: list[_TrieNode | None] = [None] * 256
+        self.values: set[tuple[bytes, int]] = set()
 
-    def add(self, token: bytes, token_id: int, index: int = 0) -> None:
-        if index == len(token):
-            self.values.append((token, token_id))
+    def add(self, key: bytes, token_id: int, idx: int = 0) -> None:
+        if idx == len(key):
+            self.values.add((key, token_id))
             return
-        child = self.children.setdefault(token[index], _TrieNode())
-        child.add(token, token_id, index + 1)
+        ch = key[idx]
+        child = self.children[ch]
+        if child is None:
+            child = _TrieNode()
+            self.children[ch] = child
+        child.add(key, token_id, idx + 1)
 
-    def longest(self, data: bytes, index: int) -> tuple[int, int]:
+    def find_longest(self, key: bytes, idx: int) -> tuple[int, set[tuple[bytes, int]]]:
         node = self
-        best: tuple[int, int] | None = None
-        while index < len(data) and data[index] in node.children:
-            node = node.children[data[index]]
-            index += 1
+        ch = key[idx]
+        best: tuple[int, set[tuple[bytes, int]]] | None = None
+        while node.children[ch] is not None:
+            node = cast(_TrieNode, node.children[ch])
+            idx += 1
             if node.values:
-                best = (index, node.values[0][1])
+                best = (idx, node.values)
+            if idx == len(key):
+                break
+            ch = key[idx]
         if best is None:
-            raise ValueError("RWKV vocabulary cannot encode the input text.")
+            raise ValueError("Failed to match a token in RWKV vocabulary.")
         return best
 
 
 class RWKVTokenizer(TokenizerLike):
-    _SPECIAL_KEYS = (
+    _CHAT_ROLE_PREFIX = {
+        "system": "System: ",
+        "user": "User: ",
+        "assistant": "Assistant: ",
+        "tool": "Tool: ",
+    }
+    _SPECIAL_TOKEN_KEYS = (
         "bos_token",
         "eos_token",
-        "pad_token",
         "unk_token",
+        "pad_token",
+        "sep_token",
+        "cls_token",
+        "mask_token",
         "additional_special_tokens",
     )
 
@@ -50,32 +98,156 @@ class RWKVTokenizer(TokenizerLike):
     def from_pretrained(
         cls,
         path_or_repo_id: str | Path,
-        *args: Any,
-        **kwargs: Any,
+        *args,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+        download_dir: str | None = None,
+        **kwargs,
     ) -> RWKVTokenizer:
-        del args
-        kwargs.pop("trust_remote_code", False)
-        kwargs.pop("revision", None)
-        kwargs.pop("download_dir", None)
-        root = Path(path_or_repo_id)
-        vocab_path = root if root.is_file() else next(root.glob("rwkv_vocab*.txt"), None)
-        if vocab_path is None:
-            raise ValueError(f"No RWKV vocabulary found under {root}.")
-        metadata = cls._load_metadata(vocab_path.parent)
-        return cls(vocab_path, metadata=metadata)
+        del args, trust_remote_code, revision, download_dir
+        root_path = Path(path_or_repo_id)
+        vocab_path = cls._resolve_vocab_path(root_path)
+        truncation_side = kwargs.pop("truncation_side", "left")
+
+        # Allow callers (or env-overrides) to point at a separate directory
+        # that holds tokenizer_config.json / chat_template.jinja when the
+        # vocab .txt lives outside a model snapshot dir.
+        metadata_dir_kw = kwargs.pop("metadata_dir", None)
+        chat_template_kw = kwargs.pop("chat_template", None)
+        extra_special_tokens = kwargs.pop("extra_special_tokens", None)
+
+        if metadata_dir_kw is not None:
+            metadata_root = Path(metadata_dir_kw)
+        elif root_path.is_dir():
+            metadata_root = root_path
+        else:
+            metadata_root = vocab_path.parent
+
+        metadata = cls._load_tokenizer_metadata(metadata_root)
+
+        # User-provided chat template wins over what the model dir ships.
+        if chat_template_kw is not None:
+            metadata["chat_template"] = cls._read_chat_template(chat_template_kw)
+
+        if extra_special_tokens:
+            ordered = list(metadata.get("ordered_special_tokens", []))
+            for tok in extra_special_tokens:
+                if isinstance(tok, str) and tok and tok not in ordered:
+                    ordered.append(tok)
+            metadata["ordered_special_tokens"] = ordered
+
+        return cls(
+            vocab_path=vocab_path,
+            truncation_side=truncation_side,
+            metadata=metadata,
+        )
 
     @staticmethod
-    def _load_metadata(root: Path) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        config_path = root / "tokenizer_config.json"
-        if config_path.is_file():
-            try:
-                loaded = json.loads(config_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                loaded = {}
-            if isinstance(loaded, dict):
-                metadata.update(loaded)
-        return metadata
+    def _read_chat_template(value: str | Path) -> str | None:
+        """Accept either a jinja string or a path to a .jinja/.txt file."""
+        if isinstance(value, Path):
+            return value.read_text(encoding="utf-8")
+        if isinstance(value, str):
+            if "\n" in value or "{" in value or "{%" in value or "{{" in value:
+                return value
+            candidate = Path(value)
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8")
+            return value
+        return None
+
+    @staticmethod
+    def _resolve_vocab_path(path_or_repo_id: str | Path) -> Path:
+        path = Path(path_or_repo_id)
+        if path.is_file():
+            return path
+        if path.is_dir():
+            candidates = sorted(path.glob("rwkv_vocab*.txt"))
+            if not candidates:
+                candidates = sorted(path.glob("*.txt"))
+            if len(candidates) == 1:
+                return candidates[0]
+        raise ValueError(f"Unable to locate an RWKV vocab txt file under {path}.")
+
+    @staticmethod
+    def _load_json_file(path: Path) -> dict[str, Any]:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError, TypeError):
+            return {}
+
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def _normalize_special_token(cls, value: Any) -> str | None:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            content = value.get("content")
+            if isinstance(content, str):
+                return content
+        return None
+
+    @classmethod
+    def _load_tokenizer_metadata(cls, path: Path) -> dict[str, Any]:
+        tokenizer_config = cls._load_json_file(path / "tokenizer_config.json")
+        special_tokens_map = cls._load_json_file(path / "special_tokens_map.json")
+        added_tokens = cls._load_json_file(path / "added_tokens.json")
+
+        explicit_special_token_ids: dict[str, int] = {}
+        for added_token, token_id in added_tokens.items():
+            if isinstance(added_token, str) and isinstance(token_id, int):
+                explicit_special_token_ids[added_token] = token_id
+
+        added_tokens_decoder = tokenizer_config.get("added_tokens_decoder", {})
+        if isinstance(added_tokens_decoder, dict):
+            for token_id, token_spec in added_tokens_decoder.items():
+                decoded_token = cls._normalize_special_token(token_spec)
+                if decoded_token is None:
+                    continue
+                try:
+                    explicit_special_token_ids.setdefault(decoded_token, int(token_id))
+                except (TypeError, ValueError):
+                    continue
+
+        ordered_special_tokens: list[str] = []
+        special_token_fields: dict[str, str] = {}
+        for source in (tokenizer_config, special_tokens_map):
+            for key in cls._SPECIAL_TOKEN_KEYS:
+                value = source.get(key)
+                if key == "additional_special_tokens" and isinstance(value, list):
+                    for item in value:
+                        extra_token = cls._normalize_special_token(item)
+                        if extra_token is not None and extra_token not in ordered_special_tokens:
+                            ordered_special_tokens.append(extra_token)
+                    continue
+
+                field_token = cls._normalize_special_token(value)
+                if field_token is None:
+                    continue
+                if field_token not in ordered_special_tokens:
+                    ordered_special_tokens.append(field_token)
+                special_token_fields.setdefault(key, field_token)
+
+        chat_template_value = tokenizer_config.get("chat_template")
+        if not isinstance(chat_template_value, str) or not chat_template_value:
+            for candidate in ("chat_template.jinja", "chat_template.txt"):
+                candidate_path = path / candidate
+                if candidate_path.is_file():
+                    try:
+                        chat_template_value = candidate_path.read_text(encoding="utf-8")
+                    except OSError:
+                        chat_template_value = None
+                    if chat_template_value:
+                        break
+
+        return {
+            "ordered_special_tokens": ordered_special_tokens,
+            "explicit_special_token_ids": explicit_special_token_ids,
+            "special_token_fields": special_token_fields,
+            "chat_template": chat_template_value,
+        }
 
     def __init__(
         self,
@@ -86,136 +258,205 @@ class RWKVTokenizer(TokenizerLike):
     ) -> None:
         self.vocab_path = vocab_path
         self._truncation_side = truncation_side
-        self._id_to_bytes: dict[int, bytes] = {}
-        self._bytes_to_id: dict[bytes, int] = {}
-        for line in vocab_path.read_text(encoding="utf-8").splitlines():
-            first_space = line.index(" ")
-            last_space = line.rindex(" ")
-            token_id = int(line[:first_space])
-            raw_token = literal_eval(line[first_space:last_space])
-            token = raw_token.encode("utf-8") if isinstance(raw_token, str) else raw_token
-            self._id_to_bytes[token_id] = token
-            self._bytes_to_id[token] = token_id
+        self._id_to_token: dict[int, bytes] = {}
+        self._token_to_id: dict[bytes, int] = {}
+
+        with vocab_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                token_id = int(line[: line.index(" ")])
+                token = literal_eval(line[line.index(" ") : line.rindex(" ")])
+                token_bytes = token.encode("utf-8") if isinstance(token, str) else token
+                assert isinstance(token_bytes, bytes)
+                self._id_to_token[token_id] = token_bytes
+                self._token_to_id[token_bytes] = token_id
+
         self._root = _TrieNode()
-        for token, token_id in self._bytes_to_id.items():
-            self._root.add(token, token_id)
+        for token_bytes, token_id in self._token_to_id.items():
+            self._root.add(token_bytes, token_id)
 
-        metadata = metadata or {}
-        self._special_tokens: dict[str, int] = {}
-        next_id = max(self._id_to_bytes, default=-1) + 1
-        for key in self._SPECIAL_KEYS:
-            value = metadata.get(key)
-            values = value if key == "additional_special_tokens" else [value]
-            if not isinstance(values, list):
-                values = [values]
-            for token in values:
-                if not isinstance(token, str):
-                    continue
-                token_bytes = token.encode("latin-1")
-                if token_bytes in self._bytes_to_id:
-                    continue
-                self._special_tokens[token] = next_id
-                next_id += 1
-        self._special_id_to_token = {v: k for k, v in self._special_tokens.items()}
-        self._token_to_id = {
-            token.decode("latin-1"): token_id
-            for token, token_id in self._bytes_to_id.items()
+        self._id_to_token_str = {
+            token_id: self._token_bytes_to_str(token_bytes) for token_id, token_bytes in self._id_to_token.items()
         }
-        self._token_to_id.update(self._special_tokens)
-        self._special_pattern = (
-            re.compile("|".join(re.escape(t) for t in self._special_tokens))
-            if self._special_tokens
-            else None
+        self._token_str_to_id = {token_str: token_id for token_id, token_str in self._id_to_token_str.items()}
+        # RWKV7 legacy SFT data encodes each entire rendered prompt with one
+        # greedy trie pass. Native vocab entries must therefore never become
+        # input-isolated HF special tokens, even when metadata lists them.
+        self._special_token_map, special_fields = self._build_legacy_added_token_map(metadata or {})
+        self._special_id_to_token = {token_id: token for token, token_id in self._special_token_map.items()}
+        self._all_special_tokens = list(self._special_token_map)
+        self._all_special_ids = [self._special_token_map[token] for token in self._all_special_tokens]
+        self._all_special_ids_set = set(self._all_special_ids)
+        self._added_vocab = {
+            token: token_id
+            for token, token_id in self._special_token_map.items()
+            if self._token_str_to_id.get(token) != token_id
+        }
+        self._vocab = {**self._token_str_to_id, **self._added_vocab}
+        self._fast_backend_supports_added_vocab = False
+        self._fast_backend_vocab_size: int | None = None
+        self._fast_backend = self._build_fast_backend()
+        max_token_id = max(
+            [*self._id_to_token.keys(), *self._special_token_map.values()],
+            default=0,
         )
-        self._chat_template = metadata.get("chat_template")
-        self._default_id = self._token_to_id.get("<|endoftext|>", 0)
-        self._bos_token_id = self._token_to_id.get(metadata.get("bos_token"), self._default_id)
-        self._eos_token_id = self._token_to_id.get(metadata.get("eos_token"), self._default_id)
-        self._pad_token_id = self._token_to_id.get(metadata.get("pad_token"), self._default_id)
+        self._known_token_slots = max_token_id + 1
+        self._vocab_size = ((self._known_token_slots + 63) // 64) * 64
+        self._default_special_id = self._resolve_default_special_id()
+        self._bos_token_id = self._resolve_named_special_id(special_fields.get("bos_token"))
+        self._eos_token_id = self._resolve_named_special_id(special_fields.get("eos_token"))
+        self._pad_token_id = self._resolve_named_special_id(special_fields.get("pad_token"))
+        self._max_chars_per_token = max(
+            [
+                *(len(token) for token in self._id_to_token.values()),
+                *(len(token.encode("utf-8")) for token in self._all_special_tokens),
+            ],
+            default=0,
+        )
+        self._special_token_pattern = self._build_special_token_pattern()
+        chat_template = metadata.get("chat_template") if metadata else None
+        self._chat_template: str | None = chat_template if isinstance(chat_template, str) else None
+        bos_token = special_fields.get("bos_token")
+        self._chat_prefix = (
+            bos_token if isinstance(chat_template, str) and bos_token is not None and bos_token in chat_template else ""
+        )
 
-    def _encode_plain(self, text: str) -> list[int]:
-        data = text.encode("utf-8")
-        index = 0
-        result: list[int] = []
-        while index < len(data):
-            index, token_id = self._root.longest(data, index)
-            result.append(token_id)
-        return result
+    def _build_fast_backend(self) -> Any | None:
+        if FastWorldTokenizer is None:
+            return None
 
-    def encode(
-        self,
-        text: str,
-        truncation: bool | None = None,
-        max_length: int | None = None,
-        add_special_tokens: bool = True,
-    ) -> list[int]:
-        del add_special_tokens
-        parts: list[str] = []
-        if self._special_pattern is None:
-            parts.append(text)
-        else:
-            last_end = 0
-            for match in self._special_pattern.finditer(text):
-                parts.append(text[last_end : match.start()])
-                parts.append(match.group(0))
-                last_end = match.end()
-            parts.append(text[last_end:])
-        result: list[int] = []
-        for part in parts:
-            if part in self._special_tokens:
-                result.append(self._special_tokens[part])
-            else:
-                result.extend(self._encode_plain(part))
-        if truncation and max_length is not None and len(result) > max_length:
-            result = result[-max_length:] if self._truncation_side == "left" else result[:max_length]
-        return result
+        from_buffer = getattr(FastWorldTokenizer, "from_buffer", None)
+        if self._added_vocab and callable(from_buffer):
+            max_rust_token_id = (1 << 16) - 1
+            if all(0 <= token_id <= max_rust_token_id for token_id in self._added_vocab.values()):
+                try:
+                    backend = from_buffer(self._build_augmented_vocab_buffer())
+                except Exception:
+                    backend = None
+                else:
+                    self._fast_backend_supports_added_vocab = True
+                    self._fast_backend_vocab_size = self._get_fast_backend_vocab_size(backend)
+                    return backend
 
-    def __call__(self, text: str | list[str], **kwargs: Any) -> BatchEncoding:
-        ids = [self.encode(item, **kwargs) for item in text] if isinstance(text, list) else self.encode(text, **kwargs)
-        return BatchEncoding({"input_ids": ids, "attention_mask": [[1] * len(x) for x in ids] if isinstance(ids, list) and ids and isinstance(ids[0], list) else [1] * len(ids)})
+        try:
+            backend = FastWorldTokenizer(str(self.vocab_path))
+        except Exception:
+            return None
+        self._fast_backend_vocab_size = self._get_fast_backend_vocab_size(backend)
+        return backend
 
-    def decode(self, ids: Sequence[int] | int, skip_special_tokens: bool = False) -> str:
-        values = [ids] if isinstance(ids, int) else list(ids)
-        chunks: list[bytes] = []
-        for token_id in values:
-            if skip_special_tokens and token_id in self._special_id_to_token:
+    @staticmethod
+    def _get_fast_backend_vocab_size(backend: Any) -> int | None:
+        vocab_size = getattr(backend, "vocab_size", None)
+        if not callable(vocab_size):
+            return None
+        try:
+            return int(vocab_size())
+        except Exception:
+            return None
+
+    def _build_augmented_vocab_buffer(self) -> bytes:
+        buffer = self.vocab_path.read_bytes()
+        if buffer and not buffer.endswith(b"\n"):
+            buffer += b"\n"
+        for token, token_id in sorted(self._added_vocab.items(), key=lambda item: item[1]):
+            token_bytes = token.encode("utf-8")
+            buffer += f"{token_id} {token!r} {len(token_bytes)}\n".encode()
+        return buffer
+
+    def _build_legacy_added_token_map(self, metadata: dict[str, Any]) -> tuple[dict[str, int], dict[str, str]]:
+        """Keep only metadata tokens that are absent from the RWKV vocabulary.
+
+        Legacy RWKV training tokenizes the full rendered prompt with the native
+        greedy trie. A native token such as ``<|im_end|>`` or ```` must
+        consequently remain available to that trie and cannot be isolated
+        before encoding. Metadata-only tokens are retained for compatibility
+        with older HF RWKV directories whose control token is not in the txt
+        vocabulary at all.
+        """
+        ordered_special_tokens = list(
+            dict.fromkeys(
+                [
+                    *metadata.get("ordered_special_tokens", []),
+                    *metadata.get("explicit_special_token_ids", {}).keys(),
+                ]
+            )
+        )
+        explicit_special_token_ids = dict(metadata.get("explicit_special_token_ids", {}))
+        special_fields = metadata.get("special_token_fields", {})
+        special_tokens: dict[str, int] = {}
+        next_token_id = (
+            max(
+                [*self._id_to_token.keys(), *explicit_special_token_ids.values()],
+                default=-1,
+            )
+            + 1
+        )
+
+        for token in ordered_special_tokens:
+            try:
+                token_bytes = self._token_str_to_bytes(token)
+            except UnicodeEncodeError:
+                token_bytes = None
+            if token_bytes is not None and token_bytes in self._token_to_id:
                 continue
-            chunks.append(self._id_to_bytes.get(token_id, self._special_id_to_token.get(token_id, "").encode()))
-        return b"".join(chunks).decode("utf-8", errors="replace")
 
-    def get_vocab(self) -> dict[str, int]:
-        return dict(self._token_to_id)
+            token_id = explicit_special_token_ids.get(token)
+            if token_id is None:
+                token_id = next_token_id
+                next_token_id += 1
+            special_tokens[token] = token_id
 
-    def get_added_vocab(self) -> dict[str, int]:
-        return dict(self._special_tokens)
+        return special_tokens, special_fields
 
-    def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
-        if isinstance(tokens, list):
-            return [self.convert_tokens_to_ids(token) for token in tokens]
-        return self._token_to_id.get(tokens, self._default_id)
+    def _resolve_named_special_id(self, token: str | None) -> int:
+        if token is None:
+            return self._default_special_id
+        special_token_id = self._special_token_map.get(token)
+        if special_token_id is not None:
+            return special_token_id
+        return self._token_str_to_id.get(token, self._default_special_id)
 
-    def convert_ids_to_tokens(self, ids: Sequence[int], skip_special_tokens: bool = False) -> list[str]:
-        return [self.decode(token_id) for token_id in ids if not (skip_special_tokens and token_id in self._special_id_to_token)]
+    def _resolve_default_special_id(self) -> int:
+        for token in (
+            "<|rwkv_tokenizer_end_of_text|>",
+            "<|endoftext|>",
+            "\n\n",
+        ):
+            token_id = self._special_token_map.get(token)
+            if token_id is not None:
+                return token_id
+        for token_bytes in (b"<|endoftext|>", b"\n\n"):
+            token_id = self._token_to_id.get(token_bytes)
+            if token_id is not None:
+                return token_id
+        return 0
 
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        return self.decode(self.convert_tokens_to_ids(tokens))
+    def _build_special_token_pattern(self) -> re.Pattern[str] | None:
+        if not self._special_token_map:
+            return None
 
-    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> str | list[int]:
-        rendered = "".join(f"{message.get('role', 'user').title()}: {message.get('content', '')}\n\n" for message in messages)
-        if kwargs.get("add_generation_prompt"):
-            rendered += "Assistant:"
-        return self.encode(rendered) if kwargs.get("tokenize") else rendered
+        tokens = sorted(self._special_token_map, key=len, reverse=True)
+        return re.compile("|".join(re.escape(token) for token in tokens))
+
+    @staticmethod
+    def _token_bytes_to_str(token: bytes) -> str:
+        return token.decode("latin-1")
+
+    @staticmethod
+    def _token_str_to_bytes(token: str) -> bytes:
+        return token.encode("latin-1")
 
     def num_special_tokens_to_add(self) -> int:
         return 0
 
     @property
     def all_special_tokens(self) -> list[str]:
-        return list(self._special_tokens)
+        return self._all_special_tokens
 
     @property
     def all_special_ids(self) -> list[int]:
-        return list(self._special_id_to_token)
+        return self._all_special_ids
 
     @property
     def bos_token_id(self) -> int:
@@ -231,20 +472,334 @@ class RWKVTokenizer(TokenizerLike):
 
     @property
     def is_fast(self) -> bool:
-        return False
+        return self._fast_backend is not None
 
     @property
     def vocab_size(self) -> int:
-        return max(self._id_to_bytes, default=-1) + 1
+        return self._vocab_size
 
     @property
     def max_token_id(self) -> int:
-        return self.vocab_size - 1
+        return self._vocab_size - 1
 
     @property
     def max_chars_per_token(self) -> int:
-        return max((len(value) for value in self._id_to_bytes.values()), default=0)
+        return self._max_chars_per_token
 
     @property
     def truncation_side(self) -> str:
         return self._truncation_side
+
+    def __call__(
+        self,
+        text: str | list[str],
+        text_pair: str | None = None,
+        add_special_tokens: bool = True,
+        truncation: bool = False,
+        max_length: int | None = None,
+    ) -> BatchEncoding:
+        del text_pair, add_special_tokens
+        if isinstance(text, str):
+            input_ids = self.encode(text, truncation=truncation, max_length=max_length)
+            return BatchEncoding({"input_ids": input_ids, "attention_mask": [1] * len(input_ids)})
+
+        batch_ids = self._encode_batch(
+            text,
+            truncation=truncation,
+            max_length=max_length,
+        )
+        return BatchEncoding(
+            {
+                "input_ids": batch_ids,
+                "attention_mask": [[1] * len(ids) for ids in batch_ids],
+            }
+        )
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self._vocab)
+
+    def get_added_vocab(self) -> dict[str, int]:
+        return dict(self._added_vocab)
+
+    def _split_special_tokens(self, text: str) -> list[tuple[bool, str]]:
+        if self._special_token_pattern is None:
+            return [(False, text)] if text else []
+
+        segments: list[tuple[bool, str]] = []
+        last_idx = 0
+        for match in self._special_token_pattern.finditer(text):
+            if match.start() > last_idx:
+                segments.append((False, text[last_idx : match.start()]))
+            segments.append((True, match.group(0)))
+            last_idx = match.end()
+
+        if last_idx < len(text):
+            segments.append((False, text[last_idx:]))
+
+        return segments
+
+    def _encode_plain_text(self, text: str) -> list[int]:
+        if not text:
+            return []
+        if self._fast_backend is not None:
+            return list(self._fast_backend.encode(text))
+
+        src = text.encode("utf-8")
+        idx = 0
+        tokens: list[int] = []
+        while idx < len(src):
+            idx, values = self._root.find_longest(src, idx)
+            _, token_id = next(iter(values))
+            tokens.append(token_id)
+        return tokens
+
+    def _encode_plain_text_batch(self, texts: list[str]) -> list[list[int]]:
+        if not texts:
+            return []
+        if self._fast_backend is not None:
+            return [list(ids) for ids in self._fast_backend.encode_batch(texts)]
+        return [self._encode_plain_text(text) for text in texts]
+
+    def _apply_truncation(
+        self,
+        tokens: list[int],
+        truncation: bool | None,
+        max_length: int | None,
+    ) -> list[int]:
+        if truncation and max_length is not None and len(tokens) > max_length:
+            if self._truncation_side == "left":
+                return tokens[-max_length:]
+            return tokens[:max_length]
+        return tokens
+
+    def _encode_segments(
+        self,
+        segments: list[tuple[bool, str]],
+        *,
+        truncation: bool | None,
+        max_length: int | None,
+    ) -> list[int]:
+        tokens: list[int] = []
+        for is_special, segment in segments:
+            if is_special:
+                tokens.append(self._special_token_map[segment])
+            else:
+                tokens.extend(self._encode_plain_text(segment))
+        return self._apply_truncation(tokens, truncation, max_length)
+
+    def _encode_batch(
+        self,
+        texts: list[str],
+        *,
+        truncation: bool | None,
+        max_length: int | None,
+    ) -> list[list[int]]:
+        split_texts = [self._split_special_tokens(text) for text in texts]
+        plain_segments = [
+            segment for split_text in split_texts for is_special, segment in split_text if not is_special and segment
+        ]
+        encoded_plain_segments = iter(self._encode_plain_text_batch(plain_segments))
+
+        batch_ids: list[list[int]] = []
+        for split_text in split_texts:
+            tokens: list[int] = []
+            for is_special, segment in split_text:
+                if is_special:
+                    tokens.append(self._special_token_map[segment])
+                elif segment:
+                    tokens.extend(next(encoded_plain_segments))
+            batch_ids.append(self._apply_truncation(tokens, truncation, max_length))
+        return batch_ids
+
+    def encode(
+        self,
+        text: str,
+        truncation: bool | None = None,
+        max_length: int | None = None,
+        add_special_tokens: bool = True,
+    ) -> list[int]:
+        del add_special_tokens
+        return self._encode_segments(
+            self._split_special_tokens(text),
+            truncation=truncation,
+            max_length=max_length,
+        )
+
+    def get_chat_template(
+        self,
+        chat_template: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str | None:
+        del tools
+        if isinstance(chat_template, str) and chat_template:
+            return chat_template
+        return self._chat_template
+
+    @staticmethod
+    def _coerce_messages_to_text(
+        messages: list[ChatCompletionMessageParam],
+    ) -> list[dict[str, Any]]:
+        """``hf_chat_utils.render_jinja_template`` only accepts string content.
+
+        Flatten OpenAI-style multimodal content lists down to plain text so
+        the jinja template still gets the message body.
+        """
+        flat: list[dict[str, Any]] = []
+        for msg in messages:
+            new_msg = dict(msg)
+            content = new_msg.get("content", "")
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            text_parts.append(str(item.get("text", "")))
+                        elif "text" in item:
+                            text_parts.append(str(item["text"]))
+                    elif isinstance(item, str):
+                        text_parts.append(item)
+                new_msg["content"] = "".join(text_parts)
+            elif content is None:
+                new_msg["content"] = ""
+            flat.append(new_msg)
+        return flat
+
+    def apply_chat_template(
+        self,
+        messages: list[ChatCompletionMessageParam] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template: str | None = None,
+        **kwargs,
+    ) -> str | list[int]:
+        conversation = kwargs.pop("conversation", None)
+        if messages is None:
+            if conversation is None:
+                raise TypeError("apply_chat_template() missing required argument: 'messages' or 'conversation'")
+            messages = conversation
+
+        add_generation_prompt = kwargs.pop("add_generation_prompt", False)
+        continue_final_message = kwargs.pop("continue_final_message", False)
+        tokenize = kwargs.pop("tokenize", False)
+        # ``return_dict`` is irrelevant for non-HF tokenizers; we only ever
+        # return the rendered string or its token ids.
+        kwargs.pop("return_dict", None)
+        documents = kwargs.pop("documents", None)
+
+        template = self.get_chat_template(chat_template, tools=tools)
+
+        if isinstance(template, str) and template:
+            try:
+                flat_messages = self._coerce_messages_to_text(list(messages))
+                rendered_batch = hf_chat_utils.render_jinja_template(
+                    conversations=[flat_messages],
+                    tools=tools,
+                    documents=documents,
+                    chat_template=template,
+                    add_generation_prompt=add_generation_prompt,
+                    continue_final_message=continue_final_message,
+                    **kwargs,
+                )
+                if isinstance(rendered_batch, tuple):
+                    rendered_batch = rendered_batch[0]
+                rendered = rendered_batch[0] if isinstance(rendered_batch, list) and rendered_batch else rendered_batch
+            except Exception:
+                logger.warning(
+                    "RWKV jinja chat template rendering failed; falling back "
+                    "to the built-in role-prefix rendering. "
+                    "Template length: %d chars.",
+                    len(template),
+                    exc_info=True,
+                )
+            else:
+                if not isinstance(rendered, str):
+                    rendered = str(rendered)
+                return self.encode(rendered) if tokenize else rendered
+
+        if tools:
+            raise ValueError(
+                "RWKV txt tokenizer fallback rendering does not support tool "
+                "schemas. Provide a jinja chat template via `chat_template=...`."
+            )
+
+        rendered_parts: list[str] = [self._chat_prefix] if self._chat_prefix else []
+        for message in messages:
+            role = cast(str, message["role"])
+            prefix = self._CHAT_ROLE_PREFIX.get(role, f"{role.title()}: ")
+            content = message.get("content", "")
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(str(item.get("text", "")))
+                content = "".join(text_parts)
+            rendered_parts.append(f"{prefix}{content}\n\n")
+        if add_generation_prompt:
+            rendered_parts.append("Assistant:")
+        rendered = "".join(rendered_parts)
+        return self.encode(rendered) if tokenize else rendered
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: str) -> int: ...
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]: ...
+
+    def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
+        if isinstance(tokens, str):
+            if tokens in self._special_token_map:
+                return self._special_token_map[tokens]
+            return self._token_str_to_id.get(tokens, self._default_special_id)
+        return [self.convert_tokens_to_ids(token) for token in tokens]
+
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+        return self.decode(cast(list[int], self.convert_tokens_to_ids(tokens)))
+
+    def decode(self, ids: Sequence[int] | int, skip_special_tokens: bool = False) -> str:
+        if isinstance(ids, int):
+            ids = [ids]
+        ids = list(ids)
+        if skip_special_tokens:
+            ids = [token_id for token_id in ids if token_id not in self._all_special_ids_set]
+        fast_decoded = self._decode_with_fast_backend(ids)
+        if fast_decoded is not None:
+            return fast_decoded
+
+        token_bytes = []
+        for token_id in ids:
+            if token_id in self._id_to_token:
+                token_bytes.append(self._id_to_token[token_id])
+            else:
+                token = self._special_id_to_token.get(token_id)
+                if token is not None:
+                    token_bytes.append(token.encode("utf-8"))
+        return b"".join(token_bytes).decode("utf-8", errors="replace")
+
+    def _decode_with_fast_backend(self, ids: list[int]) -> str | None:
+        if self._fast_backend is None:
+            return None
+        if self._added_vocab and not self._fast_backend_supports_added_vocab:
+            return None
+        if self._fast_backend_vocab_size is not None and any(
+            token_id < 0 or token_id >= self._fast_backend_vocab_size for token_id in ids
+        ):
+            return None
+        try:
+            return str(self._fast_backend.decode(ids))
+        except Exception:
+            return None
+
+    def convert_ids_to_tokens(
+        self,
+        ids: Sequence[int],
+        skip_special_tokens: bool = False,
+    ) -> list[str]:
+        special_ids = self._all_special_ids_set if skip_special_tokens else ()
+        tokens = []
+        for token_id in ids:
+            if token_id in special_ids:
+                continue
+            if token_id in self._id_to_token_str:
+                tokens.append(self._id_to_token_str[token_id])
+            else:
+                tokens.append(self._special_id_to_token.get(token_id, ""))
+        return tokens
