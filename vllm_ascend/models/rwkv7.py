@@ -905,6 +905,44 @@ class RWKV7Attention(nn.Module):
         )
         return output, final_shift_state, final_recurrent_state, v_first_out
 
+    def forward_decode_batch_with_cache(
+        self,
+        hidden_states: torch.Tensor,
+        recurrent_cache: torch.Tensor,
+        slot_ids: torch.Tensor,
+        cached_shift_state: torch.Tensor,
+        v_first: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        delta = cached_shift_state.to(hidden_states.dtype) - hidden_states
+        r, w, k, v, kk, a, g, v_first_out = self._project_recurrent_inputs(
+            hidden_states,
+            delta,
+            v_first,
+        )
+        from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
+            rwkv7_recurrent_t1_cache,
+        )
+
+        recurrent_output = rwkv7_recurrent_t1_cache(
+            recurrent_cache,
+            slot_ids,
+            w,
+            kk,
+            a,
+            k,
+            v,
+            r,
+        )
+        output = self._finalize_attention_output(
+            recurrent_output,
+            r,
+            k,
+            v,
+            g,
+            hidden_states.dtype,
+        )
+        return output, hidden_states, v_first_out
+
     def forward_prefill_cache_all(
         self,
         hidden_states: torch.Tensor,
@@ -1453,6 +1491,33 @@ class RWKV7Block(nn.Module, MambaBase):
             ffn_shift_state,
         )
 
+    def _run_decode_batch_with_recurrent_cache(
+        self,
+        hidden_states: torch.Tensor,
+        v_first: torch.Tensor | None,
+        attn_shift_state: torch.Tensor,
+        ffn_shift_state: torch.Tensor,
+        recurrent_cache: torch.Tensor,
+        slot_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = hidden_states
+        if self.pre_norm is not None:
+            residual = self.pre_norm(residual)
+        attn_input = self.attn_norm(residual)
+        attn_out, attn_shift_state, v_first_out = self.attn.forward_decode_batch_with_cache(
+            attn_input,
+            recurrent_cache,
+            slot_ids,
+            attn_shift_state,
+            v_first,
+        )
+        hidden_states = residual + attn_out
+        ffn_input = self.ffn_norm(hidden_states)
+        ffn_out, ffn_shift_state = self.ffn.forward_decode_batch(
+            ffn_input, ffn_shift_state
+        )
+        return hidden_states + ffn_out, v_first_out, attn_shift_state, ffn_shift_state
+
     def _run_prefill_batch(
         self,
         hidden_states: torch.Tensor,
@@ -1688,19 +1753,48 @@ class RWKV7Block(nn.Module, MambaBase):
                     dtype=torch.long
                 )
                 decode_output_slot_ids = decode_slot_ids
-            states = self._get_kv_states(decode_slot_ids)
-            out, vf_out, attn_shift, recurrent, ffn_shift = self._run_decode_batch(
-                hidden_states[: attn_metadata.num_decode_tokens],
-                None if v_first is None else v_first[: attn_metadata.num_decode_tokens],
-                *states,
+            can_use_cache_recurrent = (
+                envs.RWKV7_USE_FUSED_RECURRENT_CACHE_T1
+                and not cache_all
+                and self.kv_cache[1].dtype == torch.float32
+                and self.kv_cache[1].is_contiguous()
+                and decode_slot_ids.numel() == attn_metadata.num_decode_tokens
             )
+            if can_use_cache_recurrent:
+                attn_shift, ffn_shift = (
+                    self.kv_cache[0].index_select(0, decode_slot_ids),
+                    self.kv_cache[2].index_select(0, decode_slot_ids),
+                )
+                out, vf_out, attn_shift, ffn_shift = (
+                    self._run_decode_batch_with_recurrent_cache(
+                        hidden_states[: attn_metadata.num_decode_tokens],
+                        None
+                        if v_first is None
+                        else v_first[: attn_metadata.num_decode_tokens],
+                        attn_shift,
+                        ffn_shift,
+                        self.kv_cache[1],
+                        decode_slot_ids,
+                    )
+                )
+            else:
+                states = self._get_kv_states(decode_slot_ids)
+                out, vf_out, attn_shift, recurrent, ffn_shift = self._run_decode_batch(
+                    hidden_states[: attn_metadata.num_decode_tokens],
+                    None if v_first is None else v_first[: attn_metadata.num_decode_tokens],
+                    *states,
+                )
             output_slice[: attn_metadata.num_decode_tokens] = out
             v_first_slice[: attn_metadata.num_decode_tokens] = vf_out
-            self._store_kv_states(
-                decode_output_slot_ids,
-                attn_shift,
-                recurrent,
-                ffn_shift,
+            self.kv_cache[0].index_copy_(
+                0, decode_output_slot_ids, attn_shift.to(self.kv_cache[0].dtype)
+            )
+            if not can_use_cache_recurrent:
+                self.kv_cache[1].index_copy_(
+                    0, decode_output_slot_ids, recurrent.to(self.kv_cache[1].dtype)
+                )
+            self.kv_cache[2].index_copy_(
+                0, decode_output_slot_ids, ffn_shift.to(self.kv_cache[2].dtype)
             )
 
         prefill_req_offset = attn_metadata.num_decodes

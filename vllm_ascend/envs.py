@@ -137,6 +137,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "RWKV7_USE_FUSED_RECURRENT_T1": lambda: bool(
         int(os.getenv("RWKV7_USE_FUSED_RECURRENT_T1", "0"))
     ),
+    # RWKV7 decode: update FP32 recurrent state directly in the persistent
+    # cache, avoiding the per-layer index_select/index_copy materialization.
+    # Experimental; supports only the normal one-to-one align-cache decode path.
+    "RWKV7_USE_FUSED_RECURRENT_CACHE_T1": lambda: bool(
+        int(os.getenv("RWKV7_USE_FUSED_RECURRENT_CACHE_T1", "0"))
+    ),
     # RWKV7 fused block norms: combines attn_norm(residual) and
     # ffn_norm(hidden + attn_out) into one Triton launch. Targets the
     # T=1 decode path (122 LayerNorm launches saved per request).
