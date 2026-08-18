@@ -1786,16 +1786,21 @@ class RWKV7Block(nn.Module, MambaBase):
                 )
             output_slice[: attn_metadata.num_decode_tokens] = out
             v_first_slice[: attn_metadata.num_decode_tokens] = vf_out
-            self.kv_cache[0].index_copy_(
-                0, decode_output_slot_ids, attn_shift.to(self.kv_cache[0].dtype)
+            from vllm_ascend.ops.triton.fla.rwkv7_shift_state_cache import (
+                rwkv7_shift_state_cache,
+            )
+
+            rwkv7_shift_state_cache(
+                self.kv_cache[0],
+                self.kv_cache[2],
+                decode_output_slot_ids,
+                attn_shift.to(self.kv_cache[0].dtype),
+                ffn_shift.to(self.kv_cache[2].dtype),
             )
             if not can_use_cache_recurrent:
                 self.kv_cache[1].index_copy_(
                     0, decode_output_slot_ids, recurrent.to(self.kv_cache[1].dtype)
                 )
-            self.kv_cache[2].index_copy_(
-                0, decode_output_slot_ids, ffn_shift.to(self.kv_cache[2].dtype)
-            )
 
         prefill_req_offset = attn_metadata.num_decodes
         prefill_token_offset = attn_metadata.num_decode_tokens
