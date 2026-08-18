@@ -20,6 +20,9 @@ import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from vllm_ascend import envs
+from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1_cache import (  # noqa: F401
+    rwkv7_recurrent_t1_cache,
+)
 from vllm_ascend.profiler.rwkv7_counters import (
     DispatchKind,
     dispatch_hit,
@@ -27,7 +30,6 @@ from vllm_ascend.profiler.rwkv7_counters import (
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1_matrix import (
-        rwkv7_recurrent_t1_cache_fwd_kernel,
         rwkv7_recurrent_t1_matrix_fwd_kernel,
     )
 
@@ -153,9 +155,7 @@ def rwkv7_recurrent_t1(
       - head_dim and BLOCK_V fit within Triton power-of-two
     """
     if recurrent_state.ndim != 4:
-        raise ValueError(
-            "rwkv7_recurrent_t1 expects recurrent_state with rank-4 shape [B, H, D, V]"
-        )
+        raise ValueError("rwkv7_recurrent_t1 expects recurrent_state with rank-4 shape [B, H, D, V]")
 
     if (
         not HAS_TRITON
@@ -176,9 +176,7 @@ def rwkv7_recurrent_t1(
         or not v.is_contiguous()
         or not r.is_contiguous()
     ):
-        return _rwkv7_recurrent_t1_reference(
-            recurrent_state, w, kk, a, k, v, r
-        )
+        return _rwkv7_recurrent_t1_reference(recurrent_state, w, kk, a, k, v, r)
 
     B, H, D, V = recurrent_state.shape
     if (
@@ -189,20 +187,14 @@ def rwkv7_recurrent_t1(
         or v.shape != (B, H, V)
         or r.shape != (B, H, D)
     ):
-        return _rwkv7_recurrent_t1_reference(
-            recurrent_state, w, kk, a, k, v, r
-        )
+        return _rwkv7_recurrent_t1_reference(recurrent_state, w, kk, a, k, v, r)
 
     BLOCK_V = triton.next_power_of_2(V)
     if D > 256 or BLOCK_V > 256:
-        return _rwkv7_recurrent_t1_reference(
-            recurrent_state, w, kk, a, k, v, r
-        )
+        return _rwkv7_recurrent_t1_reference(recurrent_state, w, kk, a, k, v, r)
 
     new_state = torch.empty_like(recurrent_state)
-    reduce_out = torch.empty(
-        (B, H, V), device=recurrent_state.device, dtype=torch.float32
-    )
+    reduce_out = torch.empty((B, H, V), device=recurrent_state.device, dtype=torch.float32)
 
     if D == 64 and V == 64:
         rwkv7_recurrent_t1_matrix_fwd_kernel[(B, H)](
@@ -240,90 +232,3 @@ def rwkv7_recurrent_t1(
         )
     dispatch_hit(DispatchKind.RECURRENT_T1)
     return new_state, reduce_out
-
-
-def rwkv7_recurrent_t1_cache(
-    recurrent_cache: torch.Tensor,
-    slot_ids: torch.Tensor,
-    w: torch.Tensor,
-    kk: torch.Tensor,
-    a: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    r: torch.Tensor,
-) -> torch.Tensor:
-    """Update 64x64 FP32 states in their cache rows and return recurrent output."""
-    def reference() -> torch.Tensor:
-        valid_slots = slot_ids >= 0
-        reduce_out = torch.zeros(
-            (slot_ids.shape[0], recurrent_cache.shape[1], recurrent_cache.shape[-1]),
-            device=recurrent_cache.device,
-            dtype=torch.float32,
-        )
-        if not torch.any(valid_slots):
-            return reduce_out
-        valid_slot_ids = slot_ids[valid_slots]
-        state = recurrent_cache.index_select(0, valid_slot_ids)
-        new_state, valid_output = _rwkv7_recurrent_t1_reference(
-            state,
-            w[valid_slots],
-            kk[valid_slots],
-            a[valid_slots],
-            k[valid_slots],
-            v[valid_slots],
-            r[valid_slots],
-        )
-        recurrent_cache.index_copy_(0, valid_slot_ids, new_state)
-        reduce_out[valid_slots] = valid_output
-        return reduce_out
-
-    if (
-        not HAS_TRITON
-        or envs.VLLM_ASCEND_RWKV7_DISABLE_TRITON
-        or recurrent_cache.device.type not in ("npu", "cuda")
-        or recurrent_cache.dtype != torch.float32
-        or slot_ids.device != recurrent_cache.device
-        or slot_ids.dtype != torch.long
-        or not recurrent_cache.is_contiguous()
-        or not slot_ids.is_contiguous()
-    ):
-        return reference()
-
-    if recurrent_cache.ndim != 4:
-        raise ValueError("rwkv7_recurrent_t1_cache requires cache shape [S, H, D, V].")
-
-    _, H, D, V = recurrent_cache.shape
-    B = slot_ids.shape[0]
-    if (
-        D != 64
-        or V != 64
-        or w.shape != (B, H, D)
-        or kk.shape != (B, H, D)
-        or a.shape != (B, H, D)
-        or k.shape != (B, H, D)
-        or v.shape != (B, H, V)
-        or r.shape != (B, H, D)
-        or any(
-            tensor.dtype != torch.float32 or not tensor.is_contiguous()
-            for tensor in (w, kk, a, k, v, r)
-        )
-    ):
-        return reference()
-
-    reduce_out = torch.empty((B, H, V), device=recurrent_cache.device, dtype=torch.float32)
-    rwkv7_recurrent_t1_cache_fwd_kernel[(B, H)](
-        recurrent_cache,
-        slot_ids,
-        w,
-        kk,
-        a,
-        k,
-        v,
-        r,
-        reduce_out,
-        H=H,
-        D=D,
-        V=V,
-        num_warps=4,
-    )
-    return reduce_out
