@@ -382,19 +382,17 @@ perf(rwkv7): implement AscendC WKV7 recurrent kernel
 **专用环境变量**：
 
 ```bash
-# Select exactly one recurrent backend: auto (default), reference, ascendc,
-# triton_t1, or triton_t1_cache.
+# 仅选择一个 recurrent backend：auto（默认）、reference、ascendc、triton_t1 或
+# triton_t1_cache。
 VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference
 
-# Override every fused recurrent backend and force the reference path.
+# 覆盖所有 fused recurrent backend，并强制使用 reference path。
 RWKV7_DISABLE_FUSED_RECURRENT=1
 ```
 
-`triton_t1_cache` first attempts the persistent-cache Triton T=1 backend, then
-the non-cache Triton T=1 backend, and finally the reference path. `auto` and
-`ascendc` attempt AscendC before falling back to reference. An invalid backend
-value fails during environment parsing rather than silently selecting another
-backend.
+`triton_t1_cache` 依次尝试 persistent-cache Triton T=1、非 cache Triton T=1 和
+reference path。`auto` 与 `ascendc` 都会先尝试 AscendC，失败后使用 reference。无效的
+backend 值会在解析环境变量时直接失败，不会静默选择其他 backend。
 
 **依赖项**：
 
