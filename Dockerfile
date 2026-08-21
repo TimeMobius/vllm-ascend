@@ -103,21 +103,13 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
-    python3 -m pip install --no-cache-dir --no-deps --force-reinstall "scipy==1.13.1" && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install --no-cache-dir --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    python3 -m pip install --force-reinstall --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    rm -rf /usr/local/python3.12.13/lib/python3.12/site-packages/numpy* && \
-    python3 -m pip install --no-cache-dir --no-deps --force-reinstall "numpy==2.4.2" && \
-    # CANN base image ships scipy 1.18 as a single-file _propack.cpython-312-*.so
-    # (no __init__.py).  scipy 1.13 expects a PEP 420 namespace package
-    # directory of sub-modules instead.  Wipe the stale single-file C
-    # extension so the new install takes effect.
-    rm -f /usr/local/python3.12.13/lib/python3.12/site-packages/scipy/sparse/linalg/_propack.cpython-312-aarch64-linux-gnu.so && \
-    # CANN base image also pre-installs scipy 1.18.0 dist-info under
-    # site-packages/, which shadows the new 1.13.1 dist-info and confuses
-    # `pip show`.  Remove the stale dist-info so the new install is unambiguous.
-    rm -f /usr/local/python3.12.13/lib/python3.12/site-packages/scipy-1.18.0.dist-info -r /usr/local/python3.12.13/lib/python3.12/site-packages/scipy.libs 2>/dev/null || true && \
+    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    site_packages=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])') && \
+    rm -rf "$site_packages"/numpy "$site_packages"/numpy-*.dist-info "$site_packages"/numpy.libs && \
+    rm -rf "$site_packages"/scipy "$site_packages"/scipy-*.dist-info "$site_packages"/scipy.libs && \
+    python3 -m pip install --no-cache-dir --no-deps --force-reinstall "numpy==1.26.4" "scipy==1.13.1" && \
+    python3 -c 'import numba, numpy, scipy, scipy.optimize; from transformers.loss.loss_utils import LOSS_MAPPING; assert numpy.__version__ == "1.26.4"; assert scipy.__version__ == "1.13.1"' && \
     python3 -m pip cache purge
 
 # -----------------------------------------------------------------------------
@@ -137,7 +129,10 @@ RUN apt-get update -y && \
         numactl libnuma1 libibverbs1 libjemalloc2 libhiredis0.14 && \
     pip config set global.index-url ${PIP_INDEX_URL} && \
     rm -rf /var/cache/apt/* && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    site_packages=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])') && \
+    rm -rf "$site_packages"/numpy "$site_packages"/numpy-*.dist-info "$site_packages"/numpy.libs && \
+    rm -rf "$site_packages"/scipy "$site_packages"/scipy-*.dist-info "$site_packages"/scipy.libs
 
 WORKDIR /workspace
 
