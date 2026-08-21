@@ -235,3 +235,67 @@ def test_cpu_fallback_matches_gather_reference_scatter():
         )
     torch.testing.assert_close(actual_cache, expected_cache)
     torch.testing.assert_close(actual_output, expected_output)
+
+
+def test_guard_failure_routes_through_non_cache_t1_entrypoint():
+    """Guard failure must invoke the non-cache T1 entrypoint, not the reference.
+
+    Proves the persistent-cache guard failure selects valid cache rows, calls
+    ``rwkv7_recurrent_t1`` on their state, persists the returned state, and
+    returns the reduce output with zeroed padding rows.
+    """
+    cache, w, kk, a, k, value, r = _make_t1_inputs(7)
+    slot_ids = torch.tensor([3, -1, 1, 0, -1], dtype=torch.long)
+    valid_slots = slot_ids >= 0
+    valid_slot_ids = slot_ids[valid_slots]
+
+    calls = []
+
+    def fake_non_cache_t1(state, *projections):
+        calls.append(state)
+        return recurrent_t1._rwkv7_recurrent_t1_reference(state, *projections)
+
+    expected_cache = cache.clone()
+    expected_state, expected_output = recurrent_t1._rwkv7_recurrent_t1_reference(
+        expected_cache.index_select(0, valid_slot_ids),
+        w[valid_slots],
+        kk[valid_slots],
+        a[valid_slots],
+        k[valid_slots],
+        value[valid_slots],
+        r[valid_slots],
+    )
+    expected_cache.index_copy_(0, valid_slot_ids, expected_state)
+    expected_full = torch.zeros((slot_ids.shape[0], w.shape[1], w.shape[2]))
+    expected_full[valid_slots] = expected_output
+
+    actual_cache = cache.clone()
+    with mock.patch.object(recurrent_t1, "rwkv7_recurrent_t1", side_effect=fake_non_cache_t1):
+        actual_output = recurrent_t1.rwkv7_recurrent_t1_cache(
+            actual_cache, slot_ids, w, kk, a, k, value, r
+        )
+
+    assert calls, "guard failure must route through the non-cache T1 entrypoint"
+    assert calls[0].shape == (valid_slot_ids.shape[0], 2, 8, 8)
+    torch.testing.assert_close(actual_cache, expected_cache)
+    torch.testing.assert_close(actual_output, expected_full)
+    torch.testing.assert_close(
+        actual_output[~valid_slots], torch.zeros_like(actual_output[~valid_slots])
+    )
+
+
+def test_guard_failure_all_padding_skips_t1_and_returns_zeros():
+    cache, w, kk, a, k, value, r = _make_t1_inputs(3)
+    slot_ids = torch.tensor([-1, -1, -1], dtype=torch.long)
+    expected = torch.zeros((slot_ids.shape[0], w.shape[1], w.shape[2]))
+    actual_cache = cache.clone()
+    with mock.patch.object(
+        recurrent_t1,
+        "rwkv7_recurrent_t1",
+        side_effect=AssertionError("no valid slots must not call the T1 entrypoint"),
+    ):
+        actual_output = recurrent_t1.rwkv7_recurrent_t1_cache(
+            actual_cache, slot_ids, w, kk, a, k, value, r
+        )
+    torch.testing.assert_close(actual_output, expected)
+    torch.testing.assert_close(actual_cache, cache)

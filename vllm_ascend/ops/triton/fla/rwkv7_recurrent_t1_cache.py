@@ -22,8 +22,11 @@ def rwkv7_recurrent_t1_cache(
     """Update 64x64 FP32 states in their cache rows and return recurrent output."""
 
     def reference() -> torch.Tensor:
+        # Route through the non-cache T1 entrypoint, which owns its own
+        # reference fallback, so a persistent-cache guard failure degrades to
+        # non-cache T1 -> PyTorch reference per the documented backend chain.
         from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
-            _rwkv7_recurrent_t1_reference,
+            rwkv7_recurrent_t1,
         )
 
         valid_slots = slot_ids >= 0
@@ -36,7 +39,7 @@ def rwkv7_recurrent_t1_cache(
             return reduce_out
         valid_slot_ids = slot_ids[valid_slots]
         state = recurrent_cache.index_select(0, valid_slot_ids)
-        new_state, valid_output = _rwkv7_recurrent_t1_reference(
+        new_state, valid_output = rwkv7_recurrent_t1(
             state,
             w[valid_slots],
             kk[valid_slots],
