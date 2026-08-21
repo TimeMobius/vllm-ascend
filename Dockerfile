@@ -109,6 +109,11 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     python3 -m pip install --no-cache-dir --no-deps --force-reinstall "scipy==1.13.1" && \
     rm -rf /usr/local/python3.12.13/lib/python3.12/site-packages/numpy* && \
     python3 -m pip install --no-cache-dir --no-deps --force-reinstall "numpy==2.4.2" && \
+    # CANN base image ships scipy 1.18 as a single-file _propack.cpython-312-*.so
+    # (no __init__.py).  scipy 1.13 expects a PEP 420 namespace package
+    # directory of sub-modules instead.  Wipe the stale single-file C
+    # extension so the new install takes effect.
+    rm -f /usr/local/python3.12.13/lib/python3.12/site-packages/scipy/sparse/linalg/_propack.cpython-312-aarch64-linux-gnu.so && \
     python3 -m pip cache purge
 
 # -----------------------------------------------------------------------------
