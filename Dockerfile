@@ -103,10 +103,10 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
-    python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    python3 -m pip install --force-reinstall --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip install --no-cache-dir --no-deps --force-reinstall "scipy==1.13.1" && \
+    python3 -m pip uninstall -y triton triton-ascend && \
+    python3 -m pip install --no-cache-dir --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    python3 -m pip install --force-reinstall --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     rm -rf /usr/local/python3.12.13/lib/python3.12/site-packages/numpy* && \
     python3 -m pip install --no-cache-dir --no-deps --force-reinstall "numpy==2.4.2" && \
     # CANN base image ships scipy 1.18 as a single-file _propack.cpython-312-*.so
