@@ -106,7 +106,9 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip install --force-reinstall --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    python3 -m pip install --no-cache-dir --no-deps "numpy==2.4.2" "scipy==1.13.1" && \
+    python3 -m pip install --no-cache-dir --no-deps --force-reinstall "scipy==1.13.1" && \
+    rm -rf /usr/local/python3.12.13/lib/python3.12/site-packages/numpy* && \
+    python3 -m pip install --no-cache-dir --no-deps --force-reinstall "numpy==2.4.2" && \
     python3 -m pip cache purge
 
 # -----------------------------------------------------------------------------
