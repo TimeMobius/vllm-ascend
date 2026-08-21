@@ -94,6 +94,9 @@ ENV SOC_VERSION=$SOC_VERSION \
 WORKDIR /vllm-workspace
 
 COPY . /vllm-workspace/vllm-ascend/
+# csrc/build/ CMakeCache.txt hard-codes the host build path; must be wiped
+# before build_aclnn.sh runs inside the container.
+RUN rm -rf /vllm-workspace/vllm-ascend/csrc/build /vllm-workspace/vllm-ascend/csrc/build_out /vllm-workspace/vllm-ascend/csrc/output
 
 RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     export VLLM_BATCH_INVARIANT=1 && \
