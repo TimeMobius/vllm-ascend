@@ -114,6 +114,10 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     # directory of sub-modules instead.  Wipe the stale single-file C
     # extension so the new install takes effect.
     rm -f /usr/local/python3.12.13/lib/python3.12/site-packages/scipy/sparse/linalg/_propack.cpython-312-aarch64-linux-gnu.so && \
+    # CANN base image also pre-installs scipy 1.18.0 dist-info under
+    # site-packages/, which shadows the new 1.13.1 dist-info and confuses
+    # `pip show`.  Remove the stale dist-info so the new install is unambiguous.
+    rm -f /usr/local/python3.12.13/lib/python3.12/site-packages/scipy-1.18.0.dist-info -r /usr/local/python3.12.13/lib/python3.12/site-packages/scipy.libs 2>/dev/null || true && \
     python3 -m pip cache purge
 
 # -----------------------------------------------------------------------------
