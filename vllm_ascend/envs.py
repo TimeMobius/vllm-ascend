@@ -20,10 +20,57 @@
 
 import os
 from collections.abc import Callable
+from enum import Enum
 from typing import Any
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
+
+
+class RWKV7RecurrentBackend(str, Enum):
+    """Mutually-exclusive RWKV7 recurrent backend selection.
+
+    This is the single source of truth for how the RWKV7 recurrent path is
+    dispatched. It replaces the four boolean switches
+    ``RWKV7_USE_ALT_RECURRENT_KERNEL``, ``RWKV7_USE_ALT_RECURRENT_DECODE``,
+    ``RWKV7_USE_FUSED_RECURRENT_T1`` and ``RWKV7_USE_FUSED_RECURRENT_CACHE_T1``.
+    """
+
+    AUTO = "auto"
+    REFERENCE = "reference"
+    ASCENDC = "ascendc"
+    TRITON_T1 = "triton_t1"
+    TRITON_T1_CACHE = "triton_t1_cache"
+
+    # Use the AscendC ``npu_rwkv7_alt_recurrent`` kernel when its runtime
+    # guard succeeds (auto/ascendc), otherwise fall back to the reference.
+    @property
+    def uses_ascendc(self) -> bool:
+        return self in (RWKV7RecurrentBackend.AUTO, RWKV7RecurrentBackend.ASCENDC)
+
+    # Use the T=1 Triton decode kernel (non persistent-cache).
+    @property
+    def uses_triton_t1(self) -> bool:
+        return self in (RWKV7RecurrentBackend.TRITON_T1,
+                        RWKV7RecurrentBackend.TRITON_T1_CACHE)
+
+    # Prefer the persistent-cache T=1 Triton decode kernel.
+    @property
+    def uses_persistent_cache(self) -> bool:
+        return self is RWKV7RecurrentBackend.TRITON_T1_CACHE
+
+    @classmethod
+    def parse(cls, value: str) -> "RWKV7RecurrentBackend":
+        """Strictly parse a backend value, failing loudly on invalid input."""
+        try:
+            return cls(value)
+        except ValueError as exc:
+            valid = ", ".join(f"'{member.value}'" for member in cls)
+            raise ValueError(
+                f"Invalid value for VLLM_ASCEND_RWKV7_RECURRENT_BACKEND: "
+                f"{value!r}. Valid values are: {valid}."
+            ) from exc
+
 
 # begin-env-vars-definition
 
@@ -123,25 +170,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     "RWKV7_USE_DIRECT_LINEAR": lambda: bool(
         int(os.getenv("RWKV7_USE_DIRECT_LINEAR", "0"))
     ),
-    "RWKV7_USE_ALT_RECURRENT_KERNEL": lambda: bool(
-        int(os.getenv("RWKV7_USE_ALT_RECURRENT_KERNEL", "1"))
-    ),
-    # RWKV7 single-token T=1 decode path: route through AscendC
-    # npu_rwkv7_alt_recurrent kernel instead of PyTorch ref.
-    "RWKV7_USE_ALT_RECURRENT_DECODE": lambda: bool(
-        int(os.getenv("RWKV7_USE_ALT_RECURRENT_DECODE", "1"))
-    ),
-    # RWKV7 single-token T=1 fused recurrent step + reduce. Combines the
-    # recurrent state update with the trailing (state * r).sum(-2) into one
-    # Triton kernel. Targets the decode hot path (61 calls per request).
-    "RWKV7_USE_FUSED_RECURRENT_T1": lambda: bool(
-        int(os.getenv("RWKV7_USE_FUSED_RECURRENT_T1", "0"))
-    ),
-    # RWKV7 decode: update FP32 recurrent state directly in the persistent
-    # cache, avoiding the per-layer index_select/index_copy materialization.
-    # Experimental; supports only the normal one-to-one align-cache decode path.
-    "RWKV7_USE_FUSED_RECURRENT_CACHE_T1": lambda: bool(
-        int(os.getenv("RWKV7_USE_FUSED_RECURRENT_CACHE_T1", "0"))
+    # Select the RWKV7 recurrent backend. One of: auto, reference, ascendc,
+    # triton_t1, triton_t1_cache. See RWKV7RecurrentBackend for semantics.
+    # This immediately replaces the former boolean controls
+    # RWKV7_USE_ALT_RECURRENT_KERNEL / RWKV7_USE_ALT_RECURRENT_DECODE /
+    # RWKV7_USE_FUSED_RECURRENT_T1 / RWKV7_USE_FUSED_RECURRENT_CACHE_T1.
+    "VLLM_ASCEND_RWKV7_RECURRENT_BACKEND": lambda: RWKV7RecurrentBackend.parse(
+        os.getenv("VLLM_ASCEND_RWKV7_RECURRENT_BACKEND", "auto")
     ),
     # RWKV7 fused block norms: combines attn_norm(residual) and
     # ffn_norm(hidden + attn_out) into one Triton launch. Targets the

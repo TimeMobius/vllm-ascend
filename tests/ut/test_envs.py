@@ -17,6 +17,7 @@ import os
 
 import vllm_ascend.envs as envs_ascend
 from tests.ut.base import TestBase
+from vllm_ascend.envs import RWKV7RecurrentBackend
 
 
 class TestEnvVariables(TestBase):
@@ -35,7 +36,9 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if "int(" in handler_source:
+                    if var_name == "VLLM_ASCEND_RWKV7_RECURRENT_BACKEND":
+                        test_vals = [member.value for member in RWKV7RecurrentBackend]
+                    elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     elif "bool(int(" in handler_source:
                         test_vals = ["0", "1"]
