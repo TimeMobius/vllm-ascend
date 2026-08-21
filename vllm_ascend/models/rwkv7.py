@@ -1131,7 +1131,9 @@ class RWKV7Attention(nn.Module):
                 return False
             return hasattr(torch.ops._C_ascend, "npu_rwkv7_alt_recurrent")
 
-        if envs.RWKV7_USE_FUSED_RECURRENT_T1:
+        if envs.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_triton_t1 and not (
+            envs.RWKV7_DISABLE_FUSED_RECURRENT
+        ):
             from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
                 rwkv7_recurrent_t1,
             )
@@ -1145,7 +1147,9 @@ class RWKV7Attention(nn.Module):
                 v,
                 r,
             )
-        elif envs.RWKV7_USE_ALT_RECURRENT_DECODE and _can_use_alt_recurrent_decode(
+        elif envs.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_ascendc and not (
+            envs.RWKV7_DISABLE_FUSED_RECURRENT
+        ) and _can_use_alt_recurrent_decode(
                 recurrent_state, w, kk, a, k, v,
             ):
                 out_4d, state_4d = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
@@ -1754,7 +1758,8 @@ class RWKV7Block(nn.Module, MambaBase):
                 )
                 decode_output_slot_ids = decode_slot_ids
             can_use_cache_recurrent = (
-                envs.RWKV7_USE_FUSED_RECURRENT_CACHE_T1
+                envs.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_persistent_cache
+                and not envs.RWKV7_DISABLE_FUSED_RECURRENT
                 and not cache_all
                 and self.kv_cache[1].dtype == torch.float32
                 and self.kv_cache[1].is_contiguous()

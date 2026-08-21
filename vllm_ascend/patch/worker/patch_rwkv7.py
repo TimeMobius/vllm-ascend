@@ -297,7 +297,7 @@ def _can_use_alt_recurrent(
 ) -> bool:
     if envs_ascend.RWKV7_DISABLE_FUSED_RECURRENT:
         return False
-    if not envs_ascend.RWKV7_USE_ALT_RECURRENT_KERNEL:
+    if not envs_ascend.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_ascendc:
         return False
     if not _is_npu_available() or r.device.type != "npu" or r.numel() == 0:
         return False
