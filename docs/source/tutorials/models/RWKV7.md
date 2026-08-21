@@ -16,7 +16,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Checkpoint
 
-- **Path**: `/hikscale/models/RWKV/rwkv-step-12250-bf16-hf`
+- **Path**: `/hikscale/models/RWKV/Xiaoke-5-13B-2607`
 - **结构**: 61 层，hidden 4096，64 heads，head_dim 64，bf16，max_position 86016
 - **Tokenizer**: 自定义 tokenizer
 - **参考源码**: `/mnt/data/Codes/vllm`（只读语义和 API 参考，**不得直接修改**）
@@ -31,7 +31,9 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - **依赖**: CANN 9.0.0+, PyTorch 2.10.0 + torch-npu 2.10.0
 - **vLLM 版本**: 以仓库根目录 `.github/vllm-release-tag.commit` 为准。运行前可执行
   `export VLLM_VERSION="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"`
-- **环境变量**: `RWKV7_DISABLE_FUSED_RECURRENT=1` 强制使用 torch reference path
+- **recurrent backend**: `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND` 选择循环后端；默认
+  `auto`。设置 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可覆盖该选择并强制使用 torch
+  reference path。
 
 ### 3.3 代码边界说明
 
@@ -59,11 +61,10 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - **Triton-Ascend dispatch**: 已在真实 NPU 环境完成 dispatch 和 reference parity 验证
 - **AscendC WKV7 kernel**: 已实现并作为可选 recurrent path 提供
 - **Full serve / 真实权重推理**: 已在仓库 `.github/vllm-release-tag.commit` 指定的 vLLM 版本上完成真实权重加载和 HTTP smoke test
-- **END-TO-END decode throughput（910B3, 单卡, 单请求）**:
-  - Cell A eager (`--enforce-eager`)：约 3.65 tok/s（baseline，max_tokens=1024）
-  - Cell B `FULL_DECODE_ONLY` + `cudagraph_capture_sizes=[1]`：约 **14.6 tok/s（4× speedup, max_tokens=1024）**
-  - 同 Cell B 跑 `max_tokens=2048`：约 **14.9 tok/s**，speedup 在更长上下文下稳定（无回归）
-  - 修复链：`rwkv7_counters.py` graph-safe lock → `attention/utils.py` `@lru_cache` helpers 的 `try/except` → `rwkv7.py` `@support_torch_compile(enable_if=...)`
+- **END-TO-END decode throughput（910B3, 单卡, C128）**: 使用
+  `triton_t1_cache`、`--mamba-cache-mode align` 和 `FULL_AND_PIECEWISE`，两次测量
+  分别达到 **1214.300 tok/s** 和 **1213.850 tok/s**。这是面向吞吐量的并发配置，不能与
+  单请求 latency 测量直接比较。
 
 ### 4.3 版本要求
 
@@ -76,7 +77,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 > **注意**: 启动前请使用 `.github/vllm-release-tag.commit` 设置 `VLLM_VERSION`，确保 vLLM 与
 > vLLM Ascend 版本对齐。
 
-### 5.1 Recommended Startup Command (eager)
+### 5.1 Reference Startup Command
 
 ```bash
 # 强制使用 torch reference path（避免 triton-ascend FLA 未验证问题）
@@ -85,8 +86,8 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-vllm serve /hikscale/models/RWKV/rwkv-step-12250-bf16-hf \
-    --served-model-name rwkv7 \
+vllm serve /hikscale/models/RWKV/Xiaoke-5-13B-2607 \
+    --served-model-name xiaoke-5 xiaoke-5-Ascend \
     --host 0.0.0.0 \
     --port 8000 \
     --trust-remote-code \
@@ -96,35 +97,52 @@ vllm serve /hikscale/models/RWKV/rwkv-step-12250-bf16-hf \
     --gpu-memory-utilization 0.85
 ```
 
-> **保守说明**: `--max-model-len 32768` 为保守默认值，checkpoint 支持 max_position 86016，请根据实际输入长度调整。过高设置会导致 NPU 内存压力。
+> **保守说明**: `--max-model-len 32768` 为保守默认值，checkpoint 支持 max_position
+> 86016，请根据实际输入长度调整。过高设置会导致 NPU 内存压力。
 
-### 5.2 Faster Startup (ACLGraph FULL_DECODE_ONLY, T=1 单请求 4× speedup)
+### 5.2 Recommended Throughput Configuration (C128)
 
-910B3 single NPU 上，`FULL_DECODE_ONLY` + `cudagraph_capture_sizes=[1]` 把 T=1 解码从约 3.65 tok/s 提升到约 **14.6 tok/s**，且 bit-identical。性能开关保持 eager 默认（`RWKV7_USE_ALT_RECURRENT_DECODE=1`、`RWKV7_USE_FUSED_LNX_RKVRES_XG=1`），只需增加 `--compilation-config`：
+在 910B3 单卡上，以下配置使用 persistent-cache Triton T=1 recurrent backend。C128
+测量的 decode throughput 为 1214.300 tok/s 和 1213.850 tok/s。该配置针对并发吞吐量，
+不是单请求 latency preset。
 
 ```bash
+export VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=triton_t1_cache
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-vllm serve /hikscale/models/RWKV/rwkv-step-12250-bf16-hf \
-    --served-model-name rwkv7 \
+vllm serve /hikscale/models/RWKV/Xiaoke-5-13B-2607 \
+    --served-model-name xiaoke-5 xiaoke-5-Ascend \
     --host 0.0.0.0 \
     --port 8000 \
     --trust-remote-code \
-    --enforce-eager \
-    --max-model-len 8192 \
-    --max-num-seqs 1 \
-    --max-num-batched-tokens 512 \
+    --tokenizer-mode rwkv \
+    --max-model-len 1M \
+    --max-num-seqs 128 \
+    --max-num-batched-tokens 32K \
+    --mamba-cache-mode align \
     --gpu-memory-utilization 0.85 \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,32,48,64,96,128]}'
 ```
 
-> **约束**: 该模式已针对单 NPU + T=1 + `max_num_seqs=1` 验证。多并发 / prefill 场景未在本 commit 链中验证。
+> **约束**: 不要在该配置中加入 `--enforce-eager`，它会禁用图捕获。也不要默认启用
+> `RWKV7_USE_FUSED_LNX_RKVRES_XG=1`；在上述 C128 对比中它将吞吐量从 1152.0 降至
+> 970.8 tok/s（约 15.7%）。
 
 ### 5.3 Device Gating 说明
 
 本地 RWKV7 模型在 NPU 上直接调用 vllm-ascend 的 Triton-Ascend FLA dispatch，**当 dispatch 不可用时自动回退到 torch reference path**。环境变量 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可显式禁用 fused path，强制使用 torch reference。
+
+`VLLM_ASCEND_RWKV7_RECURRENT_BACKEND` 可选值为：
+
+- `auto`：AscendC runtime guard 成功时使用 AscendC，否则使用 reference。
+- `reference`：始终使用 reference。
+- `ascendc`：尝试 AscendC，guard 失败时使用 reference。
+- `triton_t1`：尝试非 persistent-cache Triton T=1 kernel，失败时使用 reference。
+- `triton_t1_cache`：依次尝试 persistent-cache Triton T=1、非 cache Triton T=1 和
+  reference。
 
 ## 6 Functional Verification
 
@@ -142,14 +160,14 @@ Expected: HTTP 200，返回模型列表。
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "rwkv7",
+        "model": "xiaoke-5",
         "messages": [{"role": "user", "content": "Hello, who are you?"}],
         "stream": false,
         "max_tokens": 64
     }'
 ```
 
-Expected: HTTP 200，非空输出。FULL_DECODE_ONLY 模式 + T=1 场景下，bit-equality 与 eager 模式一致（同一 prompt、temperature=0）。
+Expected: HTTP 200，非空输出。
 
 ## 7 Design Reference
 
