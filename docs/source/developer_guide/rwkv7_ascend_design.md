@@ -7,10 +7,11 @@
 **事实陈述：**
 
 - RWKV7 的语义参考实现位于私有 vLLM 分支；可运行的模型实现位于
-  `vllm_ascend/models/rwkv7.py`，配置位于 `vllm_ascend/models/rwkv7_config.py`
+  `vllm_ascend/models/rwkv7.py`，配置解析位于 `vllm_ascend/rwkv7_config.py`
 - RWKV7 上游 CUDA 实现位于 `/mnt/data/Codes/vllm/csrc/rwkv7_alt_recurrent.cu`（vLLM 上游 CUDA 实现，供模式参考）
 - vLLM Ascend 已知参考路径（Path A）已在 `tests/ut/ops/test_rwkv7_npu.py` 中验证通过，使用 torch fallback 在 NPU 上运行
-- RWKV7 支持通过 `RWKV7_DISABLE_FUSED_RECURRENT=1` 环境变量强制使用 reference path
+- RWKV7 支持通过 `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference`（仅循环）或
+  `VLLM_ASCEND_RWKV7_PRESET=reference`（全部算子）强制使用 reference path
 
 **待验证假设：**
 
@@ -156,7 +157,8 @@ RWKV7 的 state 语义与 GDN 的 SSM state 相似但不完全相同：
 
 1. **设备不兼容**：NPU 不满足 `use_fused` 条件
 2. **Triton 不可用**：`triton.ops.flash_linear_attention` 不可用
-3. **环境变量禁用**：`RWKV7_DISABLE_FUSED_RECURRENT=1`
+3. **配置禁用**：`VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference` 或
+   `VLLM_ASCEND_RWKV7_PRESET=reference`
 4. **AscendC kernel 缺失**：Phase 2 开发完成前
 
 ### 5.3 性能考量
@@ -254,7 +256,7 @@ vllm_ascend/
 
 - 确认 `/mnt/data/Codes/vllm` 仅作为只读参考
 - 确认 NPU 可用性和 CANN 版本（**待验证**）
-- 确认环境变量 `RWKV7_DISABLE_FUSED_RECURRENT` 可用
+- 确认 `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND` / `VLLM_ASCEND_RWKV7_PRESET` 配置可用
 
 **验收标准**：
 
@@ -298,7 +300,7 @@ feat(rwkv7): add initial RWKV7 reference path support
 
 **验收标准**：
 
-- `RWKV7_DISABLE_FUSED_RECURRENT=0` 时使用 triton-ascend path
+- 默认情况下（`VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=auto`）使用 triton-ascend path
 - 性能优于 Phase 1 的纯 torch reference（待 Profiling 验证）
 
 **风险**：triton-ascend 的 RWKV7 支持可能需要较长开发周期。
@@ -382,12 +384,20 @@ perf(rwkv7): implement AscendC WKV7 recurrent kernel
 **专用环境变量**：
 
 ```bash
-# 仅选择一个 recurrent backend：auto（默认）、reference、ascendc、triton_t1 或
-# triton_t1_cache。
+# deployment preset：reference（全部 reference）、auto（默认，按 guard）、或
+# throughput（C128 吞吐，优先 persistent-cache T=1）
+VLLM_ASCEND_RWKV7_PRESET=auto
+
+# 专家级循环后端覆盖：auto（默认）、reference、ascendc、triton_t1 或
+# triton_t1_cache。优先级高于 PRESET 的循环选择。
 VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference
 
-# 覆盖所有 fused recurrent backend，并强制使用 reference path。
-RWKV7_DISABLE_FUSED_RECURRENT=1
+# observability：off（默认）或 summary（记录并打印 dispatch 汇总）
+VLLM_ASCEND_RWKV7_OBSERVABILITY=off
+
+# 严格 JSON，最高优先级，开发用：mix6/kk_pre/epilogue/block_norms 取
+# triton/reference/auto，可另含 recurrent key 覆盖循环后端。
+VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES=
 ```
 
 `triton_t1_cache` 依次尝试 persistent-cache Triton T=1、非 cache Triton T=1 和
