@@ -17,7 +17,11 @@ import os
 
 import vllm_ascend.envs as envs_ascend
 from tests.ut.base import TestBase
-from vllm_ascend.envs import RWKV7RecurrentBackend
+from vllm_ascend.envs import (
+    RWKV7Observability,
+    RWKV7Preset,
+    RWKV7RecurrentBackend,
+)
 
 
 class TestEnvVariables(TestBase):
@@ -38,6 +42,12 @@ class TestEnvVariables(TestBase):
                     handler_source = inspect.getsource(var_handler)
                     if var_name == "VLLM_ASCEND_RWKV7_RECURRENT_BACKEND":
                         test_vals = [member.value for member in RWKV7RecurrentBackend]
+                    elif var_name == "VLLM_ASCEND_RWKV7_PRESET":
+                        test_vals = [member.value for member in RWKV7Preset]
+                    elif var_name == "VLLM_ASCEND_RWKV7_OBSERVABILITY":
+                        test_vals = [member.value for member in RWKV7Observability]
+                    elif var_name == "VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES":
+                        test_vals = ["{}", '{"mix6":"reference"}']
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     elif "bool(int(" in handler_source:

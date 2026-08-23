@@ -20,56 +20,29 @@
 
 import os
 from collections.abc import Callable
-from enum import Enum
 from typing import Any
+
+from vllm_ascend.rwkv7_config import (
+    ResolvedRWKV7Config as ResolvedRWKV7Config,
+)
+from vllm_ascend.rwkv7_config import (
+    RWKV7Observability as RWKV7Observability,
+)
+from vllm_ascend.rwkv7_config import (
+    RWKV7OperatorOverride as RWKV7OperatorOverride,
+)
+from vllm_ascend.rwkv7_config import (
+    RWKV7Preset as RWKV7Preset,
+)
+from vllm_ascend.rwkv7_config import (
+    RWKV7RecurrentBackend as RWKV7RecurrentBackend,
+)
+from vllm_ascend.rwkv7_config import (
+    resolve_rwkv7_config as resolve_rwkv7_config,
+)
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
-
-
-class RWKV7RecurrentBackend(str, Enum):
-    """Mutually-exclusive RWKV7 recurrent backend selection.
-
-    This is the single source of truth for how the RWKV7 recurrent path is
-    dispatched. It replaces the four boolean switches
-    ``RWKV7_USE_ALT_RECURRENT_KERNEL``, ``RWKV7_USE_ALT_RECURRENT_DECODE``,
-    ``RWKV7_USE_FUSED_RECURRENT_T1`` and ``RWKV7_USE_FUSED_RECURRENT_CACHE_T1``.
-    """
-
-    AUTO = "auto"
-    REFERENCE = "reference"
-    ASCENDC = "ascendc"
-    TRITON_T1 = "triton_t1"
-    TRITON_T1_CACHE = "triton_t1_cache"
-
-    # Use the AscendC ``npu_rwkv7_alt_recurrent`` kernel when its runtime
-    # guard succeeds (auto/ascendc), otherwise fall back to the reference.
-    @property
-    def uses_ascendc(self) -> bool:
-        return self in (RWKV7RecurrentBackend.AUTO, RWKV7RecurrentBackend.ASCENDC)
-
-    # Use the T=1 Triton decode kernel (non persistent-cache).
-    @property
-    def uses_triton_t1(self) -> bool:
-        return self in (RWKV7RecurrentBackend.TRITON_T1,
-                        RWKV7RecurrentBackend.TRITON_T1_CACHE)
-
-    # Prefer the persistent-cache T=1 Triton decode kernel.
-    @property
-    def uses_persistent_cache(self) -> bool:
-        return self is RWKV7RecurrentBackend.TRITON_T1_CACHE
-
-    @classmethod
-    def parse(cls, value: str) -> "RWKV7RecurrentBackend":
-        """Strictly parse a backend value, failing loudly on invalid input."""
-        try:
-            return cls(value)
-        except ValueError as exc:
-            valid = ", ".join(f"'{member.value}'" for member in cls)
-            raise ValueError(
-                f"Invalid value for VLLM_ASCEND_RWKV7_RECURRENT_BACKEND: "
-                f"{value!r}. Valid values are: {valid}."
-            ) from exc
 
 
 # begin-env-vars-definition
@@ -146,49 +119,39 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # RWKV7 dispatch instrumentation. When set to 1, records hits and fallbacks
-    # for recurrent_scan, mix6, kk_pre, and epilogue dispatches and emits a
-    # structured summary at process exit. When disabled (default), the
-    # instrumentation has minimal/no-op overhead and produces no log output.
-    # This is a diagnostic feature for kernel authors to establish actual
-    # hit/fallback behavior on real workloads; it does not change dispatch
-    # decisions or kernel math.
-    "VLLM_ASCEND_RWKV7_PROFILE": lambda: int(os.getenv("VLLM_ASCEND_RWKV7_PROFILE", "0")),
-    # Force RWKV7 Triton dispatches to use the PyTorch reference implementations.
-    # 0: use the normal Triton dispatch guards; 1: disable all RWKV7 Triton ops.
+    # Deployment-facing RWKV7 policy preset. One of: reference, auto,
+    # throughput. Expands to a default recurrent backend plus per-operator
+    # Triton modes; see vllm_ascend/rwkv7_config.py for the exact hierarchy.
+    "VLLM_ASCEND_RWKV7_PRESET": lambda: resolve_rwkv7_config().preset,
+    # Select the RWKV7 recurrent backend. One of: auto, reference, ascendc,
+    # triton_t1, triton_t1_cache. Expert override that takes higher priority
+    # than the PRESET recurrent choice (but lower than an explicit recurrent
+    # key inside VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES).
+    "VLLM_ASCEND_RWKV7_RECURRENT_BACKEND": lambda: resolve_rwkv7_config().recurrent_backend,
+    # RWKV7 observability level. One of: off, summary. Replaces the boolean
+    # VLLM_ASCEND_RWKV7_PROFILE. summary records hit/guard-fallback/kernel-
+    # exception counters and prints a summary at process exit.
+    "VLLM_ASCEND_RWKV7_OBSERVABILITY": lambda: resolve_rwkv7_config().observability,
+    # Strict per-operator RWKV7 Triton dispatch overrides, expressed as JSON.
+    # Highest precedence. Keys: mix6, kk_pre, epilogue, block_norms with
+    # values triton/reference/auto, plus an optional recurrent key equal to
+    # one of the recurrent-backend enum values. Unset/blank/{} means no
+    # override (the PRESET expansion applies).
+    "VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES": lambda: resolve_rwkv7_config().operator,
+    # Force RWKV7 Triton dispatches to use the PyTorch reference
+    # implementations. 0: use normal dispatch guards; 1: disable all RWKV7
+    # Triton ops. This global kill switch always takes precedence over
+    # VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES at the dispatch sites.
     "VLLM_ASCEND_RWKV7_DISABLE_TRITON": lambda: int(
         os.getenv("VLLM_ASCEND_RWKV7_DISABLE_TRITON", "0")
     ),
-    # RWKV7 performance controls. Each switch defaults to the reference path;
-    # enable one operator at a time when validating an NPU kernel.
-    "RWKV7_USE_FUSED_MIX6": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_MIX6", "0"))),
-    "RWKV7_USE_FUSED_KK_PRE": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_KK_PRE", "0"))),
-    "RWKV7_USE_FUSED_LNX_RKVRES_XG": lambda: bool(
-        int(os.getenv("RWKV7_USE_FUSED_LNX_RKVRES_XG", "0"))
-    ),
+    # RWKV7 fused CMIX projection. Defaults to the reference path; set to 1
+    # when validating the fused NPU kernel for this operator.
     "RWKV7_USE_FUSED_CMIX": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_CMIX", "0"))),
+    # RWKV7 direct linear path. Defaults to the reference path; set to 1 when
+    # validating the fused NPU kernel for this operator.
     "RWKV7_USE_DIRECT_LINEAR": lambda: bool(
         int(os.getenv("RWKV7_USE_DIRECT_LINEAR", "0"))
-    ),
-    # Select the RWKV7 recurrent backend. One of: auto, reference, ascendc,
-    # triton_t1, triton_t1_cache. See RWKV7RecurrentBackend for semantics.
-    # This immediately replaces the former boolean controls
-    # RWKV7_USE_ALT_RECURRENT_KERNEL / RWKV7_USE_ALT_RECURRENT_DECODE /
-    # RWKV7_USE_FUSED_RECURRENT_T1 / RWKV7_USE_FUSED_RECURRENT_CACHE_T1.
-    "VLLM_ASCEND_RWKV7_RECURRENT_BACKEND": lambda: RWKV7RecurrentBackend.parse(
-        os.getenv("VLLM_ASCEND_RWKV7_RECURRENT_BACKEND", "auto")
-    ),
-    # RWKV7 fused block norms: combines attn_norm(residual) and
-    # ffn_norm(hidden + attn_out) into one Triton launch. Targets the
-    # T=1 decode path (122 LayerNorm launches saved per request).
-    "RWKV7_USE_FUSED_BLOCK_NORMS": lambda: bool(
-        int(os.getenv("RWKV7_USE_FUSED_BLOCK_NORMS", "0"))
-    ),
-    "RWKV7_DISABLE_FUSED_PREFILL": lambda: bool(
-        int(os.getenv("RWKV7_DISABLE_FUSED_PREFILL", "0"))
-    ),
-    "RWKV7_DISABLE_FUSED_RECURRENT": lambda: bool(
-        int(os.getenv("RWKV7_DISABLE_FUSED_RECURRENT", "0"))
     ),
 }
 

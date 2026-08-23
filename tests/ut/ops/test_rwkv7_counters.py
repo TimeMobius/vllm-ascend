@@ -25,13 +25,13 @@ import unittest
 
 
 class TestRWKV7CountersDisabled(unittest.TestCase):
-    """Verify counters are a no-op when VLLM_ASCEND_RWKV7_PROFILE is unset."""
+    """Verify counters are a no-op when VLLM_ASCEND_RWKV7_OBSERVABILITY is unset."""
 
     @classmethod
     def setUpClass(cls):
         import os
 
-        os.environ.pop("VLLM_ASCEND_RWKV7_PROFILE", None)
+        os.environ.pop("VLLM_ASCEND_RWKV7_OBSERVABILITY", None)
 
     def test_disabled_is_enabled_returns_false(self):
         import importlib
@@ -59,19 +59,19 @@ class TestRWKV7CountersDisabled(unittest.TestCase):
 
 
 class TestRWKV7CountersEnabled(unittest.TestCase):
-    """Verify counters track hits/fallbacks/reset when VLLM_ASCEND_RWKV7_PROFILE=1."""
+    """Verify counters track hits/fallbacks/reset when OBSERVABILITY=summary."""
 
     @classmethod
     def setUpClass(cls):
         import os
 
-        os.environ["VLLM_ASCEND_RWKV7_PROFILE"] = "1"
+        os.environ["VLLM_ASCEND_RWKV7_OBSERVABILITY"] = "summary"
 
     @classmethod
     def tearDownClass(cls):
         import os
 
-        os.environ.pop("VLLM_ASCEND_RWKV7_PROFILE", None)
+        os.environ.pop("VLLM_ASCEND_RWKV7_OBSERVABILITY", None)
 
     def _reload(self):
         import importlib
@@ -126,13 +126,13 @@ class TestRWKV7CountersGraphSafe(unittest.TestCase):
     def setUpClass(cls):
         import os
 
-        os.environ["VLLM_ASCEND_RWKV7_PROFILE"] = "1"
+        os.environ["VLLM_ASCEND_RWKV7_OBSERVABILITY"] = "summary"
 
     @classmethod
     def tearDownClass(cls):
         import os
 
-        os.environ.pop("VLLM_ASCEND_RWKV7_PROFILE", None)
+        os.environ.pop("VLLM_ASCEND_RWKV7_OBSERVABILITY", None)
 
     def _reload(self):
         import importlib

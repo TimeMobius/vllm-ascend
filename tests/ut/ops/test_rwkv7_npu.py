@@ -9,7 +9,8 @@ This module verifies that the upstream RWKV7 reference implementation
 Path A is the torch/reference implementation that is used when:
 1. Device is not CUDA (e.g., NPU)
 2. Triton is not available
-3. Or when RWKV7_DISABLE_FUSED_RECURRENT=1
+3. Or when VLLM_ASCEND_RWKV7_PRESET=reference
+4. Or when VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference
 
 The key insight: upstream RWKV7 already handles non-CUDA devices correctly
 via the reference fallback. No vllm-ascend worker patch is required for
