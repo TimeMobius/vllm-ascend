@@ -32,8 +32,17 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - **vLLM 版本**: 以仓库根目录 `.github/vllm-release-tag.commit` 为准。运行前可执行
   `export VLLM_VERSION="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"`
 - **recurrent backend**: `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND` 选择循环后端；默认
-  `auto`。设置 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可覆盖该选择并强制使用 torch
-  reference path。
+  `auto`。要强制使用 torch reference path，直接设
+  `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference`（或用 `VLLM_ASCEND_RWKV7_PRESET=reference`）。
+- **preset**: `VLLM_ASCEND_RWKV7_PRESET` 面向绝大多数部署用户，默认 `auto`。可选值
+  `reference`（全部 reference）、`auto`（按 guard 选择）、`throughput`（C128 吞吐，
+  优先 persistent-cache T=1 recurrent 并允许已验证的融合算子）。
+- **observability**: `VLLM_ASCEND_RWKV7_OBSERVABILITY` 控制诊断，默认 `off`，可选
+  `summary`（记录 hit / guard fallback / kernel exception 并在进程退出时打印汇总）。
+- **operator overrides**: `VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES` 是严格 JSON，仅给
+  kernel 开发与性能验证使用，优先级最高。key 为 `mix6`/`kk_pre`/`epilogue`/
+  `block_norms`，value 为 `triton`/`reference`/`auto`；另可含 `recurrent` key 以便
+  最高优先级覆盖循环后端。
 
 ### 3.3 代码边界说明
 
@@ -80,8 +89,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 5.1 Reference Startup Command
 
 ```bash
-# 强制使用 torch reference path（避免 triton-ascend FLA 未验证问题）
-export RWKV7_DISABLE_FUSED_RECURRENT=1
+# 强制使用 torch reference path（避免使用任何 triton-ascend kernel）
+export VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
@@ -107,6 +116,8 @@ vllm serve /hikscale/models/RWKV/Xiaoke-5-13B-2607 \
 不是单请求 latency preset。
 
 ```bash
+# C128 吞吐 preset：优先 persistent-cache T=1 recurrent，并允许已验证的融合算子。
+export VLLM_ASCEND_RWKV7_PRESET=throughput
 export VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=triton_t1_cache
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -127,13 +138,13 @@ vllm serve /hikscale/models/RWKV/Xiaoke-5-13B-2607 \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,32,48,64,96,128]}'
 ```
 
-> **约束**: 不要在该配置中加入 `--enforce-eager`，它会禁用图捕获。也不要默认启用
-> `RWKV7_USE_FUSED_LNX_RKVRES_XG=1`；在上述 C128 对比中它将吞吐量从 1152.0 降至
-> 970.8 tok/s（约 15.7%）。
+> **约束**: 不要在该配置中加入 `--enforce-eager`，它会禁用图捕获。通过
+> `VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES` 关闭已验证外的算子时要谨慎（例如关闭
+> `epilogue` 会把吞吐量从 1214 降至约 970 tok/s）。
 
 ### 5.3 Device Gating 说明
 
-本地 RWKV7 模型在 NPU 上直接调用 vllm-ascend 的 Triton-Ascend FLA dispatch，**当 dispatch 不可用时自动回退到 torch reference path**。环境变量 `RWKV7_DISABLE_FUSED_RECURRENT=1` 可显式禁用 fused path，强制使用 torch reference。
+本地 RWKV7 模型在 NPU 上直接调用 vllm-ascend 的 Triton-Ascend FLA dispatch，**当 dispatch 不可用时自动回退到 torch reference path**。要强制使用 torch reference，设置 `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND=reference`（仅循环路径）或 `VLLM_ASCEND_RWKV7_PRESET=reference`（全部算子）。
 
 `VLLM_ASCEND_RWKV7_RECURRENT_BACKEND` 可选值为：
 

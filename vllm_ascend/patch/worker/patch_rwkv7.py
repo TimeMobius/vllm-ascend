@@ -48,6 +48,10 @@ from vllm_ascend.profiler.rwkv7_counters import (
     DispatchKind,
 )
 
+# Snapshot the resolved RWKV7 config once per process; the dispatch guards read
+# this snapshot instead of re-parsing environment variables on each call.
+_RWKV7_CONFIG = envs_ascend.resolve_rwkv7_config()
+
 # Lazy import to avoid hard dependency on Triton when not available
 _ascend_ops: Optional[object] = None
 
@@ -120,8 +124,7 @@ def _can_use_fused_recurrent(
     """Check if fused_recurrent_rwkv7 can be used safely."""
     if (
         envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
-        or envs_ascend.RWKV7_DISABLE_FUSED_RECURRENT
-        or envs_ascend.RWKV7_DISABLE_FUSED_PREFILL
+        or not _RWKV7_CONFIG.recurrent_enabled()
     ):
         return False
     ops = _get_ascend_ops()
@@ -159,7 +162,7 @@ def _can_use_epilogue_kernel(
     """Check if rwkv7_lnx_rkvres_xg can be used safely."""
     if (
         envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
-        or not envs_ascend.RWKV7_USE_FUSED_LNX_RKVRES_XG
+        or not _RWKV7_CONFIG.operator_enabled("epilogue")
     ):
         return False
     ops = _get_ascend_ops()
@@ -208,7 +211,7 @@ def _can_use_mix6_kernel(
     """Check if rwkv7_mix6 can be used safely."""
     if (
         envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
-        or not envs_ascend.RWKV7_USE_FUSED_MIX6
+        or not _RWKV7_CONFIG.operator_enabled("mix6")
     ):
         return False
     ops = _get_ascend_ops()
@@ -250,7 +253,7 @@ def _can_use_kk_pre_kernel(
     """Check if rwkv7_kk_pre can be used safely."""
     if (
         envs_ascend.VLLM_ASCEND_RWKV7_DISABLE_TRITON
-        or not envs_ascend.RWKV7_USE_FUSED_KK_PRE
+        or not _RWKV7_CONFIG.operator_enabled("kk_pre")
     ):
         return False
     ops = _get_ascend_ops()
@@ -295,9 +298,9 @@ def _can_use_alt_recurrent(
     a: torch.Tensor,
     initial_state: torch.Tensor | None,
 ) -> bool:
-    if envs_ascend.RWKV7_DISABLE_FUSED_RECURRENT:
+    if not _RWKV7_CONFIG.recurrent_enabled():
         return False
-    if not envs_ascend.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_ascendc:
+    if not _RWKV7_CONFIG.recurrent_backend.uses_ascendc:
         return False
     if not _is_npu_available() or r.device.type != "npu" or r.numel() == 0:
         return False

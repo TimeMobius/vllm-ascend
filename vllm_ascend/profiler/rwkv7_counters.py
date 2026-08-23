@@ -23,9 +23,9 @@ patch_rwkv7.py to count:
 - fallback_guard_false: guard returned False, fell back to reference
 - fallback_exception: guard was True but kernel raised, fell back to reference
 
-Controlled by VLLM_ASCEND_RWKV7_PROFILE. When disabled (default), increment()
-is a no-op with no overhead. When enabled, a structured summary is emitted
-at process exit via atexit.
+Controlled by VLLM_ASCEND_RWKV7_OBSERVABILITY. When off (default), increment()
+is a no-op with no overhead. When set to summary, a structured summary is
+emitted at process exit via atexit.
 """
 
 from __future__ import annotations
@@ -33,13 +33,14 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
-import os
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
 import torch
+
+from vllm_ascend.rwkv7_config import resolve_rwkv7_config
 
 _logger = logging.getLogger("vllm_ascend")
 
@@ -216,7 +217,8 @@ class _EnabledCounters:
         _logger.info("%s", summary)
 
 
-_ENABLED = bool(int(os.getenv("VLLM_ASCEND_RWKV7_PROFILE", "0")))
+_RWKV7_CONFIG = resolve_rwkv7_config()
+_ENABLED = _RWKV7_CONFIG.observability_enabled()
 _counters: _DisabledCounters | _EnabledCounters = (
     _EnabledCounters() if _ENABLED else _DisabledCounters()
 )

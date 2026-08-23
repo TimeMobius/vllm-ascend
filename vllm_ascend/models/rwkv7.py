@@ -55,6 +55,10 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm_ascend import envs
 from vllm_ascend.ops.triton.fla import fused_recurrent_rwkv7
 
+# Snapshot the RWKV7 configuration once per process so the dispatch hot paths
+# never re-resolve environment variables per decode step.
+_RWKV7_CONFIG = envs.resolve_rwkv7_config()
+
 LOG_DECAY_SCALE = -0.6065306597126334
 RWKV7_RUNTIME_DTYPE = torch.float32
 _NATIVE_RWKV7_BLOCK_RE = re.compile(r"blocks\.(\d+)\.(.+)")
@@ -1131,9 +1135,7 @@ class RWKV7Attention(nn.Module):
                 return False
             return hasattr(torch.ops._C_ascend, "npu_rwkv7_alt_recurrent")
 
-        if envs.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_triton_t1 and not (
-            envs.RWKV7_DISABLE_FUSED_RECURRENT
-        ):
+        if _RWKV7_CONFIG.recurrent_backend.uses_triton_t1 and _RWKV7_CONFIG.recurrent_enabled():
             from vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1 import (
                 rwkv7_recurrent_t1,
             )
@@ -1147,11 +1149,13 @@ class RWKV7Attention(nn.Module):
                 v,
                 r,
             )
-        elif envs.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_ascendc and not (
-            envs.RWKV7_DISABLE_FUSED_RECURRENT
-        ) and _can_use_alt_recurrent_decode(
+        elif (
+            _RWKV7_CONFIG.recurrent_backend.uses_ascendc
+            and _RWKV7_CONFIG.recurrent_enabled()
+            and _can_use_alt_recurrent_decode(
                 recurrent_state, w, kk, a, k, v,
-            ):
+            )
+        ):
                 out_4d, state_4d = torch.ops._C_ascend.npu_rwkv7_alt_recurrent(
                     r.unsqueeze(1),
                     w.unsqueeze(1),
@@ -1438,7 +1442,7 @@ class RWKV7Block(nn.Module, MambaBase):
         if self.pre_norm is not None:
             residual = self.pre_norm(residual)
 
-        if envs.RWKV7_USE_FUSED_BLOCK_NORMS:
+        if _RWKV7_CONFIG.operator_enabled("block_norms"):
             from vllm_ascend.ops.triton.fla.rwkv7_block_norms import (
                 rwkv7_block_norms,
             )
@@ -1758,8 +1762,8 @@ class RWKV7Block(nn.Module, MambaBase):
                 )
                 decode_output_slot_ids = decode_slot_ids
             can_use_cache_recurrent = (
-                envs.VLLM_ASCEND_RWKV7_RECURRENT_BACKEND.uses_persistent_cache
-                and not envs.RWKV7_DISABLE_FUSED_RECURRENT
+                _RWKV7_CONFIG.recurrent_backend.uses_persistent_cache
+                and _RWKV7_CONFIG.recurrent_enabled()
                 and not cache_all
                 and self.kv_cache[1].dtype == torch.float32
                 and self.kv_cache[1].is_contiguous()
