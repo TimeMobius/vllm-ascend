@@ -15,9 +15,10 @@
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
-MAX_GRID_DIM = 65535
+from vllm_ascend.ops.triton.triton_utils import (
+    get_vectorcore_num,
+    init_device_properties_triton,
+)
 
 
 def rwkv7_kk_pre_available() -> bool:
@@ -38,7 +39,6 @@ def rwkv7_kk_pre_fwd_kernel(
     k_out,
     kk_out,
     num_rows,
-    row_start,
     num_heads,
     head_dim,
     eps,
@@ -60,47 +60,45 @@ def rwkv7_kk_pre_fwd_kernel(
         k_out: [num_rows, head_dim] - adjusted key output
         kk_out: [num_rows, head_dim] - normalized kk output
         num_rows: total number of rows (T * H)
-        row_start: first global row processed by this launch
         num_heads: number of attention heads
         head_dim: dimension of each head
         eps: small constant for numerical stability in rsqrt
     """
-    row = (tl.program_id(0) + row_start).to(tl.int64)
-    if row >= num_rows:
-        return
+    pid = tl.program_id(0).to(tl.int64)
+    stride = tl.num_programs(0)
+    for row in tl.range(pid, num_rows, stride):
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < head_dim
+        head_idx = row % num_heads
 
-    offsets = tl.arange(0, BLOCK_SIZE)
-    mask = offsets < head_dim
-    head_idx = row % num_heads
+        row_offset = row * head_dim
+        head_offset = head_idx * head_dim
 
-    row_offset = row * head_dim
-    head_offset = head_idx * head_dim
+        # Load k and a values for this row
+        k_vals = tl.load(k + row_offset + offsets, mask=mask, other=0).to(tl.float32)
+        a_vals = tl.load(a + row_offset + offsets, mask=mask, other=0).to(tl.float32)
 
-    # Load k and a values for this row
-    k_vals = tl.load(k + row_offset + offsets, mask=mask, other=0).to(tl.float32)
-    a_vals = tl.load(a + row_offset + offsets, mask=mask, other=0).to(tl.float32)
+        # Load k_k and k_a for this head
+        k_k_vals = tl.load(k_k + head_offset + offsets, mask=mask, other=0).to(tl.float32)
+        k_a_vals = tl.load(k_a + head_offset + offsets, mask=mask, other=0).to(tl.float32)
 
-    # Load k_k and k_a for this head
-    k_k_vals = tl.load(k_k + head_offset + offsets, mask=mask, other=0).to(tl.float32)
-    k_a_vals = tl.load(k_a + head_offset + offsets, mask=mask, other=0).to(tl.float32)
+        # Compute kk_raw = k * k_k (element-wise)
+        kk_raw = k_vals * k_k_vals
 
-    # Compute kk_raw = k * k_k (element-wise)
-    kk_raw = k_vals * k_k_vals
+        # Compute L2 normalization using rsqrt
+        # kk = kk_raw / ||kk_raw||_2
+        # Using rsqrt for efficiency: rsqrt(x) = 1/sqrt(x)
+        kk_squared_sum = tl.sum(kk_raw * kk_raw, axis=0)
+        rstd = tl.rsqrt(kk_squared_sum + eps)
+        kk_vals = kk_raw * rstd
 
-    # Compute L2 normalization using rsqrt
-    # kk = kk_raw / ||kk_raw||_2
-    # Using rsqrt for efficiency: rsqrt(x) = 1/sqrt(x)
-    kk_squared_sum = tl.sum(kk_raw * kk_raw, axis=0)
-    rstd = tl.rsqrt(kk_squared_sum + eps)
-    kk_vals = kk_raw * rstd
+        # Compute k_adj = k * (1 + (a - 1) * k_a)
+        # This applies the activation modulation to the key
+        k_adj = k_vals * (1.0 + (a_vals - 1.0) * k_a_vals)
 
-    # Compute k_adj = k * (1 + (a - 1) * k_a)
-    # This applies the activation modulation to the key
-    k_adj = k_vals * (1.0 + (a_vals - 1.0) * k_a_vals)
-
-    # Store results
-    tl.store(k_out + row_offset + offsets, k_adj, mask=mask)
-    tl.store(kk_out + row_offset + offsets, kk_vals, mask=mask)
+        # Store results
+        tl.store(k_out + row_offset + offsets, k_adj, mask=mask)
+        tl.store(kk_out + row_offset + offsets, kk_vals, mask=mask)
 
 
 def rwkv7_kk_pre_reference(
@@ -202,24 +200,22 @@ def rwkv7_kk_pre(
     block_size = triton.next_power_of_2(head_dim)
     num_warps = 4 if block_size <= 64 else 8
 
-    # Each program processes one row; grid must cover all num_rows.
+    # Bound the physical launch and process the logical rows with a grid-stride loop.
     init_device_properties_triton()
-    for row_start in range(0, num_rows, MAX_GRID_DIM):
-        chunk_rows = min(MAX_GRID_DIM, num_rows - row_start)
-        rwkv7_kk_pre_fwd_kernel[(chunk_rows,)](
-            k=k,
-            a=a,
-            k_k=k_k,
-            k_a=k_a,
-            k_out=k_out,
-            kk_out=kk_out,
-            num_rows=num_rows,
-            row_start=row_start,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            eps=eps,
-            BLOCK_SIZE=block_size,
-            num_warps=num_warps,
-        )
+    grid_size = min(num_rows, get_vectorcore_num())
+    rwkv7_kk_pre_fwd_kernel[(grid_size,)](
+        k=k,
+        a=a,
+        k_k=k_k,
+        k_a=k_a,
+        k_out=k_out,
+        kk_out=kk_out,
+        num_rows=num_rows,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        eps=eps,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
+    )
 
     return k_out, kk_out
