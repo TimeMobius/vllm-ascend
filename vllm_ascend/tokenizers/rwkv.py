@@ -12,9 +12,6 @@ Aligned with the upstream vLLM ``vllm/tokenizers/rwkv.py`` so that:
 * ``apply_chat_template`` honours a caller-provided jinja string, falls
   back to the legacy role-prefix rendering on jinja failure, and
   ultimately uses ``metadata["chat_template"]``.
-* ``<|im_end|>`` / ``<|endoftext|>`` etc. can be promoted to special
-  tokens with the IDs declared in the HF metadata; native vocab control
-  markers stay in the legacy whole-string trie path.
 """
 
 from __future__ import annotations
@@ -39,6 +36,8 @@ except ImportError:
 
 
 logger = init_logger(__name__)
+
+_AUTO_SPECIAL_TOKEN_RE = re.compile(rb"^(?:<\|[^<>|\s]+\|>|</?(?:think|tool_call)>)$")
 
 
 class _TrieNode:
@@ -279,10 +278,7 @@ class RWKVTokenizer(TokenizerLike):
             token_id: self._token_bytes_to_str(token_bytes) for token_id, token_bytes in self._id_to_token.items()
         }
         self._token_str_to_id = {token_str: token_id for token_id, token_str in self._id_to_token_str.items()}
-        # RWKV7 legacy SFT data encodes each entire rendered prompt with one
-        # greedy trie pass. Native vocab entries must therefore never become
-        # input-isolated HF special tokens, even when metadata lists them.
-        self._special_token_map, special_fields = self._build_legacy_added_token_map(metadata or {})
+        self._special_token_map, special_fields = self._build_special_token_map(metadata or {})
         self._special_id_to_token = {token_id: token for token, token_id in self._special_token_map.items()}
         self._all_special_tokens = list(self._special_token_map)
         self._all_special_ids = [self._special_token_map[token] for token in self._all_special_tokens]
@@ -364,16 +360,7 @@ class RWKVTokenizer(TokenizerLike):
             buffer += f"{token_id} {token!r} {len(token_bytes)}\n".encode()
         return buffer
 
-    def _build_legacy_added_token_map(self, metadata: dict[str, Any]) -> tuple[dict[str, int], dict[str, str]]:
-        """Keep only metadata tokens that are absent from the RWKV vocabulary.
-
-        Legacy RWKV training tokenizes the full rendered prompt with the native
-        greedy trie. A native token such as ``<|im_end|>`` or ```` must
-        consequently remain available to that trie and cannot be isolated
-        before encoding. Metadata-only tokens are retained for compatibility
-        with older HF RWKV directories whose control token is not in the txt
-        vocabulary at all.
-        """
+    def _build_special_token_map(self, metadata: dict[str, Any]) -> tuple[dict[str, int], dict[str, str]]:
         ordered_special_tokens = list(
             dict.fromkeys(
                 [
@@ -384,7 +371,21 @@ class RWKVTokenizer(TokenizerLike):
         )
         explicit_special_token_ids = dict(metadata.get("explicit_special_token_ids", {}))
         special_fields = metadata.get("special_token_fields", {})
-        special_tokens: dict[str, int] = {}
+        auto_specials_priority = (b"<|im_start|>", b"<|im_end|>", b"<|endoftext|>")
+        prioritized = [token for token in auto_specials_priority if token in self._token_to_id]
+        remaining = sorted(
+            (token for token in self._token_to_id if _AUTO_SPECIAL_TOKEN_RE.match(token) and token not in prioritized),
+            key=lambda token: self._token_to_id[token],
+        )
+        for token_bytes in (*prioritized, *remaining):
+            token = token_bytes.decode("utf-8")
+            if token not in ordered_special_tokens:
+                ordered_special_tokens.append(token)
+            explicit_special_token_ids.setdefault(token, self._token_to_id[token_bytes])
+
+        if not ordered_special_tokens:
+            return {}, special_fields
+
         next_token_id = (
             max(
                 [*self._id_to_token.keys(), *explicit_special_token_ids.values()],
@@ -392,15 +393,8 @@ class RWKVTokenizer(TokenizerLike):
             )
             + 1
         )
-
+        special_tokens: dict[str, int] = {}
         for token in ordered_special_tokens:
-            try:
-                token_bytes = self._token_str_to_bytes(token)
-            except UnicodeEncodeError:
-                token_bytes = None
-            if token_bytes is not None and token_bytes in self._token_to_id:
-                continue
-
             token_id = explicit_special_token_ids.get(token)
             if token_id is None:
                 token_id = next_token_id
