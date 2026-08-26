@@ -28,6 +28,11 @@ When triton-ascend is unavailable, falls back to the pure torch reference.
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import (
+    get_vectorcore_num,
+    init_device_properties_triton,
+)
+
 
 @triton.jit
 def rwkv7_mix6_fwd_kernel(
@@ -47,6 +52,7 @@ def rwkv7_mix6_fwd_kernel(
     xg,
     numel,
     hidden_size,
+    num_blocks,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -55,6 +61,10 @@ def rwkv7_mix6_fwd_kernel(
     Computes 6 output tensors where each is: x + delta * x_i
     for i in {r, w, k, v, a, g}.
 
+    The kernel is launched with a physical grid bounded by the number of
+    programs available on the device; a grid-stride loop over `num_blocks`
+    covers every logical block regardless of the physical grid size.
+
     Args:
         x: hidden_states tensor of shape [numel]
         delta: delta tensor of shape [numel]
@@ -62,29 +72,32 @@ def rwkv7_mix6_fwd_kernel(
         xr/xw/xk/xv/xa/xg: output tensors of shape [numel]
         numel: total number of elements (batch * seq * hidden_size)
         hidden_size: last dimension size
+        num_blocks: total number of logical blocks (ceil(numel / BLOCK_SIZE))
         BLOCK_SIZE: triton block size
     """
     pid = tl.program_id(0).to(tl.int64)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < numel
-    cols = offsets % hidden_size
+    stride = tl.num_programs(0)
+    for block in tl.range(pid, num_blocks, stride):
+        offsets = block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < numel
+        cols = offsets % hidden_size
 
-    x_vals = tl.load(x + offsets, mask=mask, other=0).to(tl.float32)
-    delta_vals = tl.load(delta + offsets, mask=mask, other=0).to(tl.float32)
+        x_vals = tl.load(x + offsets, mask=mask, other=0).to(tl.float32)
+        delta_vals = tl.load(delta + offsets, mask=mask, other=0).to(tl.float32)
 
-    x_r_vals = tl.load(x_r + cols, mask=mask, other=0).to(tl.float32)
-    x_w_vals = tl.load(x_w + cols, mask=mask, other=0).to(tl.float32)
-    x_k_vals = tl.load(x_k + cols, mask=mask, other=0).to(tl.float32)
-    x_v_vals = tl.load(x_v + cols, mask=mask, other=0).to(tl.float32)
-    x_a_vals = tl.load(x_a + cols, mask=mask, other=0).to(tl.float32)
-    x_g_vals = tl.load(x_g + cols, mask=mask, other=0).to(tl.float32)
+        x_r_vals = tl.load(x_r + cols, mask=mask, other=0).to(tl.float32)
+        x_w_vals = tl.load(x_w + cols, mask=mask, other=0).to(tl.float32)
+        x_k_vals = tl.load(x_k + cols, mask=mask, other=0).to(tl.float32)
+        x_v_vals = tl.load(x_v + cols, mask=mask, other=0).to(tl.float32)
+        x_a_vals = tl.load(x_a + cols, mask=mask, other=0).to(tl.float32)
+        x_g_vals = tl.load(x_g + cols, mask=mask, other=0).to(tl.float32)
 
-    tl.store(xr + offsets, x_vals + delta_vals * x_r_vals, mask=mask)
-    tl.store(xw + offsets, x_vals + delta_vals * x_w_vals, mask=mask)
-    tl.store(xk + offsets, x_vals + delta_vals * x_k_vals, mask=mask)
-    tl.store(xv + offsets, x_vals + delta_vals * x_v_vals, mask=mask)
-    tl.store(xa + offsets, x_vals + delta_vals * x_a_vals, mask=mask)
-    tl.store(xg + offsets, x_vals + delta_vals * x_g_vals, mask=mask)
+        tl.store(xr + offsets, x_vals + delta_vals * x_r_vals, mask=mask)
+        tl.store(xw + offsets, x_vals + delta_vals * x_w_vals, mask=mask)
+        tl.store(xk + offsets, x_vals + delta_vals * x_k_vals, mask=mask)
+        tl.store(xv + offsets, x_vals + delta_vals * x_v_vals, mask=mask)
+        tl.store(xa + offsets, x_vals + delta_vals * x_a_vals, mask=mask)
+        tl.store(xg + offsets, x_vals + delta_vals * x_g_vals, mask=mask)
 
 
 def rwkv7_mix6_reference(
@@ -209,7 +222,18 @@ def rwkv7_mix6(
 
     block_size = min(2048, triton.next_power_of_2(hidden_size))
     num_warps = 4 if block_size <= 1024 else 8
-    grid = (triton.cdiv(numel, block_size),)
+    num_blocks = triton.cdiv(numel, block_size)
+
+    # Bound the physical launch grid on NPU by the device vector-core count and
+    # cover the remaining logical blocks with a kernel-internal grid-stride
+    # loop. CUDA keeps a one-program-per-block grid, which the stride loop
+    # degenerates to when stride == num_blocks.
+    if hidden_states.device.type == "npu":
+        init_device_properties_triton()
+        grid_size = min(num_blocks, get_vectorcore_num())
+    else:
+        grid_size = num_blocks
+    grid = (grid_size,)
 
     rwkv7_mix6_fwd_kernel[grid](
         x=hidden_states,
@@ -228,6 +252,7 @@ def rwkv7_mix6(
         xg=xg,
         numel=numel,
         hidden_size=hidden_size,
+        num_blocks=num_blocks,
         BLOCK_SIZE=block_size,
         num_warps=num_warps,
     )

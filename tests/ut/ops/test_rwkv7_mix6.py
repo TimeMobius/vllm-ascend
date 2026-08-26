@@ -200,6 +200,17 @@ class TestRWKV7Mix6Parity(unittest.TestCase):
         """Test with large batch size."""
         self._run_parity_check(batch=32, seq=1, hidden=64)
 
+    def test_parity_large_grid(self):
+        """Regression: logical grid >= 65536 must not exceed the Ascend coreDim limit.
+
+        With block_size = next_power_of_2(64) = 64, batch * seq = 128 * 512
+        gives numel = 4,194,304 and num_blocks = 65,536, which exceeds the
+        Ascend coreDim limit of 65,535. The NPU launch must bound the physical
+        grid by the vector-core count and cover all logical blocks via the
+        kernel-internal grid-stride loop.
+        """
+        self._run_parity_check(batch=128, seq=512, hidden=64)
+
 
 class TestRWKV7Mix6ReferenceOnly(unittest.TestCase):
     """Test the reference implementation directly (for debugging)."""
