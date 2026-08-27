@@ -132,6 +132,12 @@ def get_chip_type() -> str:
         return ""
 
 
+# envs.py imports from vllm_ascend.rwkv7_config at module top level. During
+# PEP 517 build isolation the package is not installed, so expose the source
+# tree on sys.path to make that import resolvable while we load envs.py.
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
 if not envs.SOC_VERSION:
