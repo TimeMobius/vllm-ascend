@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
@@ -42,6 +43,50 @@ def _stream(
 
 def test_rwkv_tool_parser_is_registered():
     assert ToolParserManager.get_tool_parser("rwkv") is RWKVToolParser
+
+
+def test_rwkv_tool_parser_adjust_request_keeps_sp_tool_markers():
+    chat_tool = ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name="search",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+    )
+    request = ChatCompletionRequest(
+        model="rwkv-test",
+        messages=[],
+        tools=[chat_tool],
+        tool_choice="auto",
+    )
+
+    assert request.skip_special_tokens is True
+
+    adjusted_request = RWKVToolParser(None).adjust_request(request)
+
+    assert adjusted_request.skip_special_tokens is False
+
+
+def test_rwkv_tool_parser_adjust_request_required_skips_structured_outputs():
+    chat_tool = ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name="search",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+    )
+    request = ChatCompletionRequest(
+        model="rwkv-test",
+        messages=[],
+        tools=[chat_tool],
+        tool_choice="required",
+    )
+
+    adjusted_request = RWKVToolParser(None).adjust_request(request)
+
+    # RWKV uses native XML; must not be forced into JSON guided decoding.
+    assert adjusted_request.skip_special_tokens is False
+    assert adjusted_request.structured_outputs is None
 
 
 def test_rwkv_tool_parser_accepts_upstream_two_arg_signature():

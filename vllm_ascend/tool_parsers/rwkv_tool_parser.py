@@ -5,8 +5,12 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from openai.types.responses import ToolChoiceFunction
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,6 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import ToolParser
 class RWKVToolParser(ToolParser):
     tool_call_start_token = "<tool_call>"
     tool_call_end_token = "</tool_call>"
+    supports_required_and_named = False
 
     def __init__(
         self,
@@ -45,6 +50,26 @@ class RWKVToolParser(ToolParser):
             r"<parameter\s+name\s*=\s*(['\"])(.*?)\1\s*>(.*?)</parameter>",
             re.DOTALL,
         )
+
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if request.tools:
+            tool_choice = request.tool_choice
+            if tool_choice == "required" or isinstance(
+                tool_choice, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
+            ):
+                # RWKV emits native <tool_call><invoke>...</invoke></tool_call>
+                # XML. The base adjust_request would set structured_outputs and
+                # force JSON guided decoding for required/named choices, which
+                # conflicts with that native syntax and crashes with a 500.
+                # Skip it so the model emits its native format (mirrors Gemma4).
+                request.skip_special_tokens = False
+                return request
+        request = super().adjust_request(request)
+        if request.tools and request.tool_choice != "none":
+            # <tool_call> is an SP special token. Keep it in the decoded
+            # output so the parser can recognize the complete XML block.
+            request.skip_special_tokens = False
+        return request
 
     @staticmethod
     def _extract_types_from_schema(schema: Any) -> list[str]:
