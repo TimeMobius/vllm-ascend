@@ -825,7 +825,7 @@ def _patch_recurrent_inputs():
 
 
 def _patch_linear_attention_metadata():
-    """Expose cache-all block indices on vLLM's linear attention metadata."""
+    """Expose cache-all block indices with stable pointers for cudagraph capture."""
     try:
         linear_attn = importlib.import_module("vllm.v1.attention.backends.linear_attn")
     except ImportError:
@@ -835,51 +835,177 @@ def _patch_linear_attention_metadata():
     if getattr(builder, "_RWKV7_CACHE_ALL_PATCHED", False):
         return
 
+    from vllm.utils.math_utils import cdiv
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    original_init = builder.__init__
+
+    def _init_with_stable_buffers(
+        self, kv_cache_spec, layer_names, vllm_config, device
+    ):
+        original_init(self, kv_cache_spec, layer_names, vllm_config, device)
+
+        compilation_config = vllm_config.compilation_config
+        cudagraph_mode = compilation_config.cudagraph_mode
+        self._rwkv7_use_full_cuda_graph = (
+            cudagraph_mode is not None and cudagraph_mode.has_full_cudagraphs()
+        )
+
+        decode_cudagraph_max_bs = vllm_config.scheduler_config.max_num_seqs
+        if compilation_config.max_cudagraph_capture_size is not None:
+            decode_cudagraph_max_bs = min(
+                decode_cudagraph_max_bs,
+                compilation_config.max_cudagraph_capture_size,
+            )
+        self._rwkv7_decode_cudagraph_max_bs = decode_cudagraph_max_bs
+
+        cache_mode = vllm_config.cache_config.mamba_cache_mode
+        if cache_mode == "all":
+            max_num_blocks = (
+                cdiv(vllm_config.model_config.max_model_len, kv_cache_spec.block_size)
+                + kv_cache_spec.num_speculative_blocks
+            )
+            self._rwkv7_state_indices = torch.empty(
+                (decode_cudagraph_max_bs, max_num_blocks),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._rwkv7_num_computed_tokens = torch.empty(
+                (decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._rwkv7_block_idx_last_computed_token = torch.empty(
+                (decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._rwkv7_block_idx_first_scheduled_token = torch.empty(
+                (decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._rwkv7_block_idx_last_scheduled_token = torch.empty(
+                (decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            self._rwkv7_state_indices = torch.empty(
+                (decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+
+    builder.__init__ = _init_with_stable_buffers
+
     original_build = builder.build
 
-    def build_with_cache_all(self, common_prefix_len, common_attn_metadata, fast_build=False):
+    def _build_with_stable_metadata(
+        self, common_prefix_len, common_attn_metadata, fast_build=False
+    ):
         metadata = original_build(
             self,
             common_prefix_len,
             common_attn_metadata,
             fast_build,
         )
-        if self.vllm_config.cache_config.mamba_cache_mode != "all":
-            return metadata
 
+        cache_mode = self.vllm_config.cache_config.mamba_cache_mode
         block_size = self.kv_cache_spec.block_size
-        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-        metadata.state_indices_tensor = common_attn_metadata.block_table_tensor
-        metadata.num_computed_tokens = num_computed_tokens
-        metadata.block_idx_last_computed_token = torch.clamp(
-            torch.div(
-                num_computed_tokens + block_size - 1,
-                block_size,
-                rounding_mode="floor",
+
+        if cache_mode == "all":
+            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            metadata.state_indices_tensor = common_attn_metadata.block_table_tensor
+            metadata.num_computed_tokens = num_computed_tokens
+            metadata.block_idx_last_computed_token = torch.clamp(
+                torch.div(
+                    num_computed_tokens + block_size - 1,
+                    block_size,
+                    rounding_mode="floor",
+                )
+                - 1,
+                min=0,
             )
-            - 1,
-            min=0,
-        )
-        metadata.block_idx_first_scheduled_token = (
-            torch.div(
-                num_computed_tokens + block_size,
-                block_size,
-                rounding_mode="floor",
+            metadata.block_idx_first_scheduled_token = (
+                torch.div(
+                    num_computed_tokens + block_size,
+                    block_size,
+                    rounding_mode="floor",
+                )
+                - 1
             )
-            - 1
-        )
-        metadata.block_idx_last_scheduled_token = torch.clamp(
-            torch.div(
-                common_attn_metadata.seq_lens + block_size - 1,
-                block_size,
-                rounding_mode="floor",
+            metadata.block_idx_last_scheduled_token = torch.clamp(
+                torch.div(
+                    common_attn_metadata.seq_lens + block_size - 1,
+                    block_size,
+                    rounding_mode="floor",
+                )
+                - 1,
+                min=0,
             )
-            - 1,
-            min=0,
-        )
+
+        num_decodes = metadata.num_decodes
+        if (
+            self._rwkv7_use_full_cuda_graph
+            and metadata.num_prefills == 0
+            and num_decodes <= self._rwkv7_decode_cudagraph_max_bs
+        ):
+            padded_bs = common_attn_metadata.num_reqs
+            if cache_mode == "all":
+                self._rwkv7_state_indices[:num_decodes].copy_(
+                    metadata.state_indices_tensor[:num_decodes],
+                    non_blocking=True,
+                )
+                self._rwkv7_state_indices[num_decodes:].fill_(NULL_BLOCK_ID)
+                metadata.state_indices_tensor = self._rwkv7_state_indices[:padded_bs]
+
+                self._rwkv7_num_computed_tokens[:num_decodes].copy_(
+                    metadata.num_computed_tokens[:num_decodes],
+                    non_blocking=True,
+                )
+                self._rwkv7_num_computed_tokens[num_decodes:].fill_(0)
+                metadata.num_computed_tokens = (
+                    self._rwkv7_num_computed_tokens[:padded_bs]
+                )
+
+                self._rwkv7_block_idx_last_computed_token[:num_decodes].copy_(
+                    metadata.block_idx_last_computed_token[:num_decodes],
+                    non_blocking=True,
+                )
+                self._rwkv7_block_idx_last_computed_token[num_decodes:].fill_(0)
+                metadata.block_idx_last_computed_token = (
+                    self._rwkv7_block_idx_last_computed_token[:padded_bs]
+                )
+
+                self._rwkv7_block_idx_first_scheduled_token[:num_decodes].copy_(
+                    metadata.block_idx_first_scheduled_token[:num_decodes],
+                    non_blocking=True,
+                )
+                self._rwkv7_block_idx_first_scheduled_token[num_decodes:].fill_(0)
+                metadata.block_idx_first_scheduled_token = (
+                    self._rwkv7_block_idx_first_scheduled_token[:padded_bs]
+                )
+
+                self._rwkv7_block_idx_last_scheduled_token[:num_decodes].copy_(
+                    metadata.block_idx_last_scheduled_token[:num_decodes],
+                    non_blocking=True,
+                )
+                self._rwkv7_block_idx_last_scheduled_token[num_decodes:].fill_(0)
+                metadata.block_idx_last_scheduled_token = (
+                    self._rwkv7_block_idx_last_scheduled_token[:padded_bs]
+                )
+            else:
+                self._rwkv7_state_indices[:num_decodes].copy_(
+                    metadata.state_indices_tensor[:num_decodes],
+                    non_blocking=True,
+                )
+                self._rwkv7_state_indices[num_decodes:].fill_(NULL_BLOCK_ID)
+                metadata.state_indices_tensor = self._rwkv7_state_indices[:padded_bs]
+
         return metadata
 
-    builder.build = build_with_cache_all
+    builder.build = _build_with_stable_metadata
     builder._RWKV7_CACHE_ALL_PATCHED = True
 
 
