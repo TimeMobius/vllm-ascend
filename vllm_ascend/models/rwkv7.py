@@ -5,6 +5,8 @@
 import re
 from collections.abc import Iterable
 from itertools import islice
+from math import log2
+from typing import Final
 
 import torch
 import torch.nn.functional as F
@@ -61,6 +63,17 @@ _RWKV7_CONFIG = envs.resolve_rwkv7_config()
 
 LOG_DECAY_SCALE = -0.6065306597126334
 RWKV7_RUNTIME_DTYPE = torch.float32
+EPILOGUE_ROWS_CANDIDATES: Final = (1, 2, 4, 8, 16)
+EPILOGUE_ROWS_CALIBRATED_HEADS: Final = 16
+# Each tuple is (ROWS, polynomial coefficients), fitted from the NPU sweep in
+# test_workspaces/rwkv7_tuning for H=16 and D=V=64.
+EPILOGUE_ROWS_FORMULA_COEFFICIENTS: Final = (
+    (1, (0.1645586580, -1.2508591925, 4.0741289155, -2.5356303381, 2.7801110277)),
+    (2, (0.0875258441, -0.6905621262, 2.2647690288, -1.4036399069, 2.5178118645)),
+    (4, (0.0636931947, -0.6203558214, 2.2709590523, -1.9948115067, 3.2076833550)),
+    (8, (0.0235535208, -0.1348864894, 0.3756985597, -0.1394841317, 4.9003592273)),
+    (16, (-0.0141958960, 0.3891387020, -1.8263008726, 2.3748998952, 8.7918763541)),
+)
 _NATIVE_RWKV7_BLOCK_RE = re.compile(r"blocks\.(\d+)\.(.+)")
 
 _NATIVE_RWKV7_TOP_LEVEL_NAME_MAP = {
@@ -118,6 +131,29 @@ def get_tp_world_size() -> int:
 
 def get_tp_rank() -> int:
     return get_tensor_model_parallel_rank() if model_parallel_is_initialized() else 0
+
+
+def select_epilogue_rows(num_tokens: int, num_heads: int) -> int:
+    """Select ROWS by minimizing the calibrated duration formula."""
+    total_rows = num_tokens * num_heads
+    if total_rows <= 0:
+        return 1
+    calibrated_batch = total_rows / EPILOGUE_ROWS_CALIBRATED_HEADS
+    log_batch = log2(max(calibrated_batch, 1.0))
+
+    def predicted_duration(model: tuple[int, tuple[float, ...]]) -> float:
+        rows, coefficients = model
+        value = 0.0
+        for coefficient in coefficients:
+            value = value * log_batch + coefficient
+        return max(0.0, value)
+
+    available_models = tuple(
+        model
+        for model in EPILOGUE_ROWS_FORMULA_COEFFICIENTS
+        if model[0] in EPILOGUE_ROWS_CANDIDATES and model[0] <= total_rows
+    )
+    return min(available_models, key=predicted_duration)[0]
 
 
 def sqrelu(x: torch.Tensor) -> torch.Tensor:

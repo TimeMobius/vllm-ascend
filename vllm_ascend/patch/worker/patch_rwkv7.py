@@ -570,6 +570,7 @@ def _patch_finalize_attention_output():
     if getattr(RWKV7Attention, "_ASCEND_EPILOGUE_PATCHED", False):
         return
 
+    select_epilogue_rows = rwkv7_module.select_epilogue_rows
     original_finalize = RWKV7Attention._finalize_attention_output
 
     def _finalize_attention_output_ascend(
@@ -638,6 +639,10 @@ def _patch_finalize_attention_output():
             )
 
         try:
+            rows = select_epilogue_rows(
+                num_tokens,
+                recurrent_output.shape[1],
+            )
             output = ops.rwkv7_lnx_rkvres_xg(
                 recurrent_output=recurrent_output,
                 r=r,
@@ -648,6 +653,7 @@ def _patch_finalize_attention_output():
                 bias=local_bias,
                 g=g,
                 eps=self.g_norm.eps,
+                rows=rows,
             )
             dispatch_hit(DispatchKind.EPILOGUE)
             output = output.to(hidden_dtype)
