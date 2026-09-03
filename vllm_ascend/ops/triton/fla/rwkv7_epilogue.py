@@ -38,10 +38,12 @@ def rwkv7_lnx_rkvres_xg_fwd_kernel(
     g,
     out,
     row_start,
+    chunk_rows,
     num_heads,
     head_dim,
     head_v_dim,
     eps,
+    ROWS: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_V: tl.constexpr,
 ):
@@ -58,62 +60,59 @@ def rwkv7_lnx_rkvres_xg_fwd_kernel(
         bias: [num_heads * head_v_dim] - group norm bias
         g: [num_tokens, num_heads * head_v_dim] - gating
         out: [num_tokens, num_heads * head_v_dim] - output
-        row_start: first global token-head row processed by this launch
+        row_start: first global token-head row of this launch's chunk
+        chunk_rows: number of token-head rows covered by this launch
     """
-    row_head = (tl.program_id(0) + row_start).to(tl.int64)
-    head_idx = row_head % num_heads
-    token_idx = row_head // num_heads
-
+    pid = tl.program_id(0)
     k_offsets = tl.arange(0, BLOCK_K)
     v_offsets = tl.arange(0, BLOCK_V)
     mask_k = k_offsets < head_dim
     mask_v = v_offsets < head_v_dim
 
-    key_base = row_head * head_dim
-    value_base = row_head * head_v_dim
-    gate_base = token_idx * num_heads * head_v_dim + head_idx * head_v_dim
-    r_k_base = head_idx * head_dim
-    affine_base = head_idx * head_v_dim
+    row_base = row_start + pid * ROWS
+    chunk_end = row_start + chunk_rows
 
-    # GroupNorm computation on recurrent_output
-    # Load recurrent_output values
-    x_vals = tl.load(
-        recurrent_output + value_base + v_offsets,
-        mask=mask_v,
-        other=0.0,
-    ).to(tl.float32)
+    for i in tl.static_range(0, ROWS):
+        row_head = (row_base + i).to(tl.int64)
+        valid_row = row_head < chunk_end
+        head_idx = row_head % num_heads
+        token_idx = row_head // num_heads
 
-    # Compute mean over head_v_dim
-    mean = tl.sum(x_vals, axis=0) / head_v_dim
-    centered = tl.where(mask_v, x_vals - mean, 0.0)
+        key_base = row_head * head_dim
+        value_base = row_head * head_v_dim
+        gate_base = token_idx * num_heads * head_v_dim + head_idx * head_v_dim
+        r_k_base = head_idx * head_dim
+        affine_base = head_idx * head_v_dim
 
-    # Compute variance and rstd
-    var = tl.sum(centered * centered, axis=0) / head_v_dim
-    rstd = tl.rsqrt(var + eps)
+        row_mask_k = valid_row & mask_k
+        row_mask_v = valid_row & mask_v
 
-    # Load r, k, r_k for recurrent correction
-    r_vals = tl.load(r + key_base + k_offsets, mask=mask_k, other=0).to(tl.float32)
-    k_vals = tl.load(k + key_base + k_offsets, mask=mask_k, other=0).to(tl.float32)
-    r_k_vals = tl.load(r_k + r_k_base + k_offsets, mask=mask_k, other=0).to(tl.float32)
+        x_vals = tl.load(
+            recurrent_output + value_base + v_offsets,
+            mask=row_mask_v,
+            other=0.0,
+        ).to(tl.float32)
+        mean = tl.sum(x_vals, axis=0) / head_v_dim
+        centered = tl.where(mask_v, x_vals - mean, 0.0)
+        var = tl.sum(centered * centered, axis=0) / head_v_dim
+        rstd = tl.rsqrt(var + eps)
 
-    # Compute correction scale: sum(r * k * r_k, axis=-1)
-    correction_scale = tl.sum(r_vals * k_vals * r_k_vals, axis=0)
+        r_vals = tl.load(r + key_base + k_offsets, mask=row_mask_k, other=0).to(tl.float32)
+        k_vals = tl.load(k + key_base + k_offsets, mask=row_mask_k, other=0).to(tl.float32)
+        r_k_vals = tl.load(r_k + r_k_base + k_offsets, mask=row_mask_k, other=0).to(tl.float32)
+        correction_scale = tl.sum(r_vals * k_vals * r_k_vals, axis=0)
 
-    # Load v, weight, bias, g for final computation
-    v_vals = tl.load(v + value_base + v_offsets, mask=mask_v, other=0).to(tl.float32)
-    weight_vals = tl.load(weight + affine_base + v_offsets, mask=mask_v, other=0).to(
-        tl.float32
-    )
-    bias_vals = tl.load(bias + affine_base + v_offsets, mask=mask_v, other=0).to(
-        tl.float32
-    )
-    g_vals = tl.load(g + gate_base + v_offsets, mask=mask_v, other=0).to(tl.float32)
+        v_vals = tl.load(v + value_base + v_offsets, mask=row_mask_v, other=0).to(tl.float32)
+        weight_vals = tl.load(weight + affine_base + v_offsets, mask=row_mask_v, other=0).to(tl.float32)
+        bias_vals = tl.load(bias + affine_base + v_offsets, mask=row_mask_v, other=0).to(tl.float32)
+        g_vals = tl.load(g + gate_base + v_offsets, mask=row_mask_v, other=0).to(tl.float32)
 
-    # Compute final output:
-    # y = centered * rstd * weight + bias + correction_scale * v
-    # out = y * g
-    y = centered * rstd * weight_vals + bias_vals + correction_scale * v_vals
-    tl.store(out + gate_base + v_offsets, (y * g_vals).to(out.dtype.element_ty), mask=mask_v)
+        y = centered * rstd * weight_vals + bias_vals + correction_scale * v_vals
+        tl.store(
+            out + gate_base + v_offsets,
+            (y * g_vals).to(out.dtype.element_ty),
+            mask=row_mask_v,
+        )
 
 
 def rwkv7_lnx_rkvres_xg(
@@ -128,6 +127,7 @@ def rwkv7_lnx_rkvres_xg(
     *,
     eps: float,
     output_dtype: torch.dtype | None = None,
+    rows: int | None = None,
 ) -> torch.Tensor:
     """
     RWKV7 epilogue: GroupNorm + RecurrentCorrection + Gating.
@@ -146,22 +146,22 @@ def rwkv7_lnx_rkvres_xg(
         g: [num_tokens, num_heads * head_v_dim] - gating
         eps: GroupNorm epsilon
         output_dtype: Output dtype (defaults to g.dtype)
+        rows: Token-head rows per program; must be one of the supported variants.
 
     Returns:
         out: [num_tokens, num_heads * head_v_dim]
     """
+    effective_rows = 1 if rows is None else rows
+    if effective_rows not in (1, 2, 4, 8, 16):
+        raise ValueError(f"`rows` must be one of 1, 2, 4, 8, or 16, got {effective_rows}.")
+
     # Input validation (mirrors upstream)
     if recurrent_output.ndim != 3:
-        raise ValueError(
-            f"`recurrent_output` must be 3D, got {recurrent_output.ndim}."
-        )
+        raise ValueError(f"`recurrent_output` must be 3D, got {recurrent_output.ndim}.")
     if r.shape != k.shape:
         raise ValueError(f"`r` and `k` must match, got {r.shape} and {k.shape}.")
     if recurrent_output.shape != v.shape:
-        raise ValueError(
-            "`recurrent_output` and `v` must match, got "
-            f"{recurrent_output.shape} and {v.shape}."
-        )
+        raise ValueError(f"`recurrent_output` and `v` must match, got {recurrent_output.shape} and {v.shape}.")
     if recurrent_output.shape[:2] != r.shape[:2]:
         raise ValueError(
             "`recurrent_output` and `r` must share token/head dimensions, got "
@@ -180,9 +180,7 @@ def rwkv7_lnx_rkvres_xg(
             f"{local_value_dim}, got {weight.shape} and {bias.shape}."
         )
     if g.shape != (num_tokens, local_value_dim):
-        raise ValueError(
-            f"`g` must have shape {(num_tokens, local_value_dim)}, got {g.shape}."
-        )
+        raise ValueError(f"`g` must have shape {(num_tokens, local_value_dim)}, got {g.shape}.")
 
     if output_dtype is None:
         output_dtype = g.dtype
@@ -242,11 +240,12 @@ def rwkv7_lnx_rkvres_xg(
     )
 
     # Launch kernel
-    num_warps = 4 if max(block_k, block_v) <= 64 else 8
+    num_warps = 2 if effective_rows >= 8 and max(block_k, block_v) <= 64 else 4 if max(block_k, block_v) <= 64 else 8
     total_rows = num_tokens * num_heads
     for row_start in range(0, total_rows, MAX_GRID_DIM):
         chunk_rows = min(MAX_GRID_DIM, total_rows - row_start)
-        rwkv7_lnx_rkvres_xg_fwd_kernel[(chunk_rows,)](
+        grid_rows = (chunk_rows + effective_rows - 1) // effective_rows
+        rwkv7_lnx_rkvres_xg_fwd_kernel[(grid_rows,)](
             recurrent_output=recurrent_output,
             r=r,
             k=k,
@@ -257,10 +256,12 @@ def rwkv7_lnx_rkvres_xg(
             g=g,
             out=out,
             row_start=row_start,
+            chunk_rows=chunk_rows,
             num_heads=num_heads,
             head_dim=head_dim,
             head_v_dim=head_v_dim,
             eps=eps,
+            ROWS=effective_rows,
             BLOCK_K=block_k,
             BLOCK_V=block_v,
             num_warps=num_warps,
@@ -302,8 +303,6 @@ def rwkv7_lnx_rkvres_xg_reference(
     ).squeeze(-1)
 
     # Recurrent correction: ((r * k * r_k.unsqueeze(0)).sum(dim=-1, keepdim=True) * v).reshape(...)
-    correction = ((r * k * r_k.unsqueeze(0)).sum(dim=-1, keepdim=True) * v).reshape(
-        -1, local_value_dim
-    )
+    correction = ((r * k * r_k.unsqueeze(0)).sum(dim=-1, keepdim=True) * v).reshape(-1, local_value_dim)
 
     return ((output + correction) * g.to(torch.float32)).to(output_dtype)

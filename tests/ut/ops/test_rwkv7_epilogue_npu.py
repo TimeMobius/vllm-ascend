@@ -446,6 +446,47 @@ class TestRWKV7EpilogueNPUParity(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(out).all())
 
+    def test_rows_candidates_match_reference(self):
+        from vllm_ascend.ops.triton.fla.rwkv7_epilogue import (
+            rwkv7_lnx_rkvres_xg,
+            rwkv7_lnx_rkvres_xg_reference,
+        )
+
+        for rows in (1, 2, 4, 8, 16):
+            with self.subTest(rows=rows):
+                num_tokens, num_heads, head_dim, head_v_dim = 17, 8, 64, 64
+                eps = 64e-5
+                recurrent_output = torch.randn(
+                    num_tokens,
+                    num_heads,
+                    head_v_dim,
+                    device="npu",
+                    dtype=torch.float32,
+                )
+                r = torch.randn(num_tokens, num_heads, head_dim, device="npu")
+                k = torch.randn_like(r)
+                v = torch.randn_like(recurrent_output)
+                r_k = torch.randn(num_heads, head_dim, device="npu")
+                weight = torch.randn(num_heads * head_v_dim, device="npu")
+                bias = torch.randn(num_heads * head_v_dim, device="npu")
+                g = torch.randn(num_tokens, num_heads * head_v_dim, device="npu")
+                common = dict(
+                    recurrent_output=recurrent_output,
+                    r=r,
+                    k=k,
+                    v=v,
+                    r_k=r_k,
+                    weight=weight,
+                    bias=bias,
+                    g=g,
+                    eps=eps,
+                )
+                ref_out = rwkv7_lnx_rkvres_xg_reference(**common)
+                actual_out = rwkv7_lnx_rkvres_xg(**common, rows=rows)
+                torch.testing.assert_close(
+                    ref_out, actual_out, atol=1e-4, rtol=1e-4
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
