@@ -93,7 +93,13 @@ if HAS_TRITON:
         new_state = w * state + (kk * a) * sa + k * value
 
         tl.store(cache_base + d_offsets * V + v_offsets[None, :], new_state)
-        tl.store(out_ptr, tl.sum(new_state * r, axis=0))
+
+        # Fold sum(new_state * r) without changing the dense cache update.
+        c_scalar = tl.sum(r * kk * a, axis=0)
+        t_scalar = tl.sum(r * k, axis=0)
+        mid = tl.sum(w * state * r, axis=0)
+        folded_out = mid + c_scalar * sa + t_scalar * value
+        tl.store(out_ptr, folded_out)
 
     @triton.jit
     def rwkv7_recurrent_t1_cache_fwd_grouped_kernel(
@@ -150,8 +156,14 @@ if HAS_TRITON:
                 a = tl.load(a_ptr + scalar_base + d_offsets).to(tl.float32)
                 k = tl.load(k_ptr + scalar_base + d_offsets).to(tl.float32)
                 r = tl.load(r_ptr + scalar_base + d_offsets).to(tl.float32)
-                value = tl.load(v_ptr + value_base + v_offsets)[None, :].to(tl.float32)
-                new_state = w * state + (kk * a) * sa + k * value
+                value = tl.load(v_ptr + value_base + v_offsets).to(tl.float32)
+                new_state = w * state + (kk * a) * sa + k * value[None, :]
 
                 tl.store(cache_base + d_offsets * V + v_offsets[None, :], new_state)
-                tl.store(out_ptr, tl.sum(new_state * r, axis=0))
+
+                # Fold sum(new_state * r) while preserving the cache state.
+                c_scalar = tl.sum(r * kk * a, axis=0)
+                t_scalar = tl.sum(r * k, axis=0)
+                mid = tl.sum(w * state * r, axis=0)
+                folded_out = mid + c_scalar * sa + t_scalar * value
+                tl.store(out_ptr, folded_out)

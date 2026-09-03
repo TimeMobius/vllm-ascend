@@ -12,6 +12,15 @@ import vllm_ascend.ops.triton.fla.rwkv7_recurrent_t1_cache as recurrent_t1_cache
 from vllm_ascend.ops.triton.fla import rwkv7_recurrent_t1_matrix as matrix_mod
 
 
+def _assert_rwkv7_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    torch.npu.synchronize()
+    actual_float = actual.float()
+    expected_float = expected.float()
+    max_abs = (actual_float - expected_float).abs().max().item()
+    reference_scale = expected_float.abs().max().item()
+    assert max_abs <= 2e-4 + 2e-4 * reference_scale
+
+
 def _make_t1_inputs(batch_size, *, heads=2, head_dim=8, value_dim=8, device="cpu", dtype=torch.float32):
     generator = torch.Generator(device="cpu").manual_seed(17)
     state = torch.randn(batch_size, heads, head_dim, value_dim, generator=generator, device="cpu", dtype=dtype)
@@ -123,6 +132,70 @@ def test_npu_cache_wrapper_supports_c128_production_shape():
     torch.npu.synchronize()
     torch.testing.assert_close(actual_cache, expected_cache, atol=2e-4, rtol=2e-4)
     torch.testing.assert_close(actual_output, expected_output, atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("batch_size", [1, 127, 128])
+def test_npu_folded_cache_state_and_output_parity(batch_size):
+    if not torch.npu.is_available() or not recurrent_t1.HAS_TRITON:
+        pytest.skip("requires an NPU with Triton-Ascend")
+    H, D, V = 64, 64, 64
+    generator = torch.Generator(device="npu").manual_seed(29 + batch_size)
+    recurrent_cache = torch.randn(
+        310, H, D, V, generator=generator, device="npu", dtype=torch.float32
+    )
+    w = torch.randn(batch_size, H, D, generator=generator, device="npu")
+    kk = torch.randn(batch_size, H, D, generator=generator, device="npu")
+    a = torch.randn(batch_size, H, D, generator=generator, device="npu")
+    k = torch.randn(batch_size, H, D, generator=generator, device="npu")
+    value = torch.randn(batch_size, H, V, generator=generator, device="npu")
+    r = torch.randn(batch_size, H, D, generator=generator, device="npu")
+    slot_ids = torch.randperm(310, generator=generator, device="npu")[:batch_size]
+
+    expected_cache = recurrent_cache.clone()
+    expected_state, expected_output = recurrent_t1._rwkv7_recurrent_t1_reference(
+        expected_cache.index_select(0, slot_ids), w, kk, a, k, value, r
+    )
+    expected_cache.index_copy_(0, slot_ids, expected_state)
+    actual_cache = recurrent_cache.clone()
+    actual_output = recurrent_t1.rwkv7_recurrent_t1_cache(
+        actual_cache, slot_ids, w, kk, a, k, value, r
+    )
+    torch.npu.synchronize()
+
+    _assert_rwkv7_close(actual_cache, expected_cache)
+    _assert_rwkv7_close(actual_output, expected_output)
+
+
+def test_npu_folded_cache_multistep_state_and_output_parity():
+    if not torch.npu.is_available() or not recurrent_t1.HAS_TRITON:
+        pytest.skip("requires an NPU with Triton-Ascend")
+    batch_size, steps = 128, 12
+    H, D, V = 64, 64, 64
+    generator = torch.Generator(device="npu").manual_seed(41)
+    actual_cache = torch.randn(
+        310, H, D, V, generator=generator, device="npu", dtype=torch.float32
+    )
+    expected_cache = actual_cache.clone()
+    slot_ids = torch.randperm(310, generator=generator, device="npu")[:batch_size]
+
+    for _ in range(steps):
+        w = torch.randn(batch_size, H, D, generator=generator, device="npu")
+        kk = torch.randn(batch_size, H, D, generator=generator, device="npu")
+        a = torch.randn(batch_size, H, D, generator=generator, device="npu")
+        k = torch.randn(batch_size, H, D, generator=generator, device="npu")
+        value = torch.randn(batch_size, H, V, generator=generator, device="npu")
+        r = torch.randn(batch_size, H, D, generator=generator, device="npu")
+
+        expected_state, expected_output = recurrent_t1._rwkv7_recurrent_t1_reference(
+            expected_cache.index_select(0, slot_ids), w, kk, a, k, value, r
+        )
+        expected_cache.index_copy_(0, slot_ids, expected_state)
+        actual_output = recurrent_t1.rwkv7_recurrent_t1_cache(
+            actual_cache, slot_ids, w, kk, a, k, value, r
+        )
+
+        _assert_rwkv7_close(actual_cache, expected_cache)
+        _assert_rwkv7_close(actual_output, expected_output)
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 16, 64, 128])
@@ -244,7 +317,7 @@ def test_guard_failure_routes_through_non_cache_t1_entrypoint():
     ``rwkv7_recurrent_t1`` on their state, persists the returned state, and
     returns the reduce output with zeroed padding rows.
     """
-    cache, w, kk, a, k, value, r = _make_t1_inputs(7)
+    cache, w, kk, a, k, value, r = _make_t1_inputs(5)
     slot_ids = torch.tensor([3, -1, 1, 0, -1], dtype=torch.long)
     valid_slots = slot_ids >= 0
     valid_slot_ids = slot_ids[valid_slots]
