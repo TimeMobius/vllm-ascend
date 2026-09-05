@@ -15,6 +15,11 @@
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from vllm_ascend.ops.triton.fla.rwkv7_kk_pre_token_head import (
+    rwkv7_kk_pre_token_head_2d_kernel,
+    select_token_head_tile,
+    token_head_grid,
+)
 from vllm_ascend.ops.triton.triton_utils import (
     get_vectorcore_num,
     init_device_properties_triton,
@@ -23,11 +28,7 @@ from vllm_ascend.ops.triton.triton_utils import (
 
 def rwkv7_kk_pre_available() -> bool:
     """Check if triton-ascend is available and can run rwkv7_kk_pre."""
-    if not HAS_TRITON:
-        return False
-    if not torch.npu.is_available():
-        return False
-    return True
+    return HAS_TRITON and torch.npu.is_available()
 
 
 @triton.jit
@@ -163,10 +164,7 @@ def rwkv7_kk_pre(
     if k_k.ndim != 2:
         raise ValueError(f"`k_k` must be 2D, got {k_k.ndim}.")
     if k.shape[1:] != k_k.shape:
-        raise ValueError(
-            "`k_k`/`k_a` must match the head layout of `k`, got "
-            f"{k.shape[1:]} and {k_k.shape}."
-        )
+        raise ValueError(f"`k_k`/`k_a` must match the head layout of `k`, got {k.shape[1:]} and {k_k.shape}.")
 
     # Check if we can use triton-ascend
     # Conditions for using Triton kernel:
@@ -192,7 +190,8 @@ def rwkv7_kk_pre(
     kk_out = torch.empty_like(k, dtype=output_dtype)
 
     # Compute grid dimensions
-    num_rows = k.shape[0] * k.shape[1]  # T * H
+    num_tokens = k.shape[0]  # T
+    num_rows = num_tokens * k.shape[1]  # T * H
     num_heads = k.shape[1]  # H
     head_dim = k.shape[2]  # K
 
@@ -200,8 +199,34 @@ def rwkv7_kk_pre(
     block_size = triton.next_power_of_2(head_dim)
     num_warps = 4 if block_size <= 64 else 8
 
-    # Bound the physical launch and process the logical rows with a grid-stride loop.
     init_device_properties_triton()
+    # Measured token-head path: the head-stationary token-head tile kernel.
+    # Selected only for calibrated real D=64 TP-local shapes (local heads
+    # 64/32/16/8, T >= 4); otherwise the legacy one-row grid-stride kernel
+    # below is used. The selector is a deterministic host-side function of the
+    # local runtime shape, so the launch is stable for a given (T, H, D).
+    token_block = select_token_head_tile(num_tokens, num_heads, head_dim)
+    if token_block is not None:
+        grid_size = token_head_grid(num_tokens, num_heads, token_block)
+        rwkv7_kk_pre_token_head_2d_kernel[(grid_size,)](
+            k=k,
+            a=a,
+            k_k=k_k,
+            k_a=k_a,
+            k_out=k_out,
+            kk_out=kk_out,
+            num_tokens=num_tokens,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            eps=eps,
+            BLOCK_SIZE=block_size,
+            TOKEN_BLOCK=token_block,
+            num_warps=num_warps,
+        )
+        return k_out, kk_out
+
+    # Legacy path (uncalibrated shapes / T < 4): bound the physical launch
+    # and process the logical rows with a grid-stride loop.
     grid_size = min(num_rows, get_vectorcore_num())
     rwkv7_kk_pre_fwd_kernel[(grid_size,)](
         k=k,
