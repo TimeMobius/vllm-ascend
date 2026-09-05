@@ -100,6 +100,54 @@ def rwkv7_mix6_fwd_kernel(
         tl.store(xg + offsets, x_vals + delta_vals * x_g_vals, mask=mask)
 
 
+@triton.jit
+def rwkv7_mix6_row_fwd_kernel(
+    x,
+    delta,
+    x_r,
+    x_w,
+    x_k,
+    x_v,
+    x_a,
+    x_g,
+    xr,
+    xw,
+    xk,
+    xv,
+    xa,
+    xg,
+    num_blocks,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCKS_PER_ROW: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Use compile-time row geometry for aligned 1024-element blocks."""
+    pid = tl.program_id(0).to(tl.int64)
+    stride = tl.num_programs(0)
+    cols_in_block = tl.arange(0, BLOCK_SIZE)
+    for block in tl.range(pid, num_blocks, stride):
+        row = block // BLOCKS_PER_ROW
+        column_start = (block % BLOCKS_PER_ROW) * BLOCK_SIZE
+        offsets = row * HIDDEN_SIZE + column_start + cols_in_block
+        cols = column_start + cols_in_block
+
+        x_vals = tl.load(x + offsets).to(tl.float32)
+        delta_vals = tl.load(delta + offsets).to(tl.float32)
+        x_r_vals = tl.load(x_r + cols).to(tl.float32)
+        x_w_vals = tl.load(x_w + cols).to(tl.float32)
+        x_k_vals = tl.load(x_k + cols).to(tl.float32)
+        x_v_vals = tl.load(x_v + cols).to(tl.float32)
+        x_a_vals = tl.load(x_a + cols).to(tl.float32)
+        x_g_vals = tl.load(x_g + cols).to(tl.float32)
+
+        tl.store(xr + offsets, x_vals + delta_vals * x_r_vals)
+        tl.store(xw + offsets, x_vals + delta_vals * x_w_vals)
+        tl.store(xk + offsets, x_vals + delta_vals * x_k_vals)
+        tl.store(xv + offsets, x_vals + delta_vals * x_v_vals)
+        tl.store(xa + offsets, x_vals + delta_vals * x_a_vals)
+        tl.store(xg + offsets, x_vals + delta_vals * x_g_vals)
+
+
 def rwkv7_mix6_reference(
     hidden_states: torch.Tensor,
     delta: torch.Tensor,
@@ -235,27 +283,57 @@ def rwkv7_mix6(
         grid_size = num_blocks
     grid = (grid_size,)
 
-    rwkv7_mix6_fwd_kernel[grid](
-        x=hidden_states,
-        delta=delta,
-        x_r=x_r,
-        x_w=x_w,
-        x_k=x_k,
-        x_v=x_v,
-        x_a=x_a,
-        x_g=x_g,
-        xr=xr,
-        xw=xw,
-        xk=xk,
-        xv=xv,
-        xa=xa,
-        xg=xg,
-        numel=numel,
-        hidden_size=hidden_size,
-        num_blocks=num_blocks,
-        BLOCK_SIZE=block_size,
-        num_warps=num_warps,
-    )
+    if (
+        hidden_states.device.type == "npu"
+        and hidden_size >= 1024
+        and hidden_size % 1024 == 0
+    ):
+        row_block_size = 1024
+        row_num_blocks = triton.cdiv(numel, row_block_size)
+        row_grid = (min(row_num_blocks, get_vectorcore_num()),)
+        rwkv7_mix6_row_fwd_kernel[row_grid](
+            x=hidden_states,
+            delta=delta,
+            x_r=x_r,
+            x_w=x_w,
+            x_k=x_k,
+            x_v=x_v,
+            x_a=x_a,
+            x_g=x_g,
+            xr=xr,
+            xw=xw,
+            xk=xk,
+            xv=xv,
+            xa=xa,
+            xg=xg,
+            num_blocks=row_num_blocks,
+            HIDDEN_SIZE=hidden_size,
+            BLOCKS_PER_ROW=hidden_size // row_block_size,
+            BLOCK_SIZE=row_block_size,
+            num_warps=4,
+        )
+    else:
+        rwkv7_mix6_fwd_kernel[grid](
+            x=hidden_states,
+            delta=delta,
+            x_r=x_r,
+            x_w=x_w,
+            x_k=x_k,
+            x_v=x_v,
+            x_a=x_a,
+            x_g=x_g,
+            xr=xr,
+            xw=xw,
+            xk=xk,
+            xv=xv,
+            xa=xa,
+            xg=xg,
+            numel=numel,
+            hidden_size=hidden_size,
+            num_blocks=num_blocks,
+            BLOCK_SIZE=block_size,
+            num_warps=num_warps,
+        )
     if is_3d:
         xr = xr.view(original_shape)
         xw = xw.view(original_shape)

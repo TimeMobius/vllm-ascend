@@ -19,7 +19,12 @@ import unittest
 
 import torch
 
-from vllm_ascend.ops.triton.fla.rwkv7_mix6 import rwkv7_mix6, rwkv7_mix6_reference
+from vllm_ascend.ops.triton.fla.rwkv7_mix6 import (
+    rwkv7_mix6,
+    rwkv7_mix6_fwd_kernel,
+    rwkv7_mix6_reference,
+    rwkv7_mix6_row_fwd_kernel,
+)
 
 
 class TestRWKV7Mix6Parity(unittest.TestCase):
@@ -83,6 +88,16 @@ class TestRWKV7Mix6Parity(unittest.TestCase):
     def test_parity_bfloat16(self):
         """Test parity with bfloat16 dtype."""
         self._run_parity_check(batch=2, seq=4, hidden=64, dtype=torch.bfloat16)
+
+    def test_row_specialized_kernel_is_available(self):
+        """Verify the production module exposes the optimized row kernel."""
+        self.assertIsNotNone(rwkv7_mix6_row_fwd_kernel)
+        self.assertIsNotNone(rwkv7_mix6_fwd_kernel)
+
+    def test_row_specialized_dispatch_bfloat16(self):
+        """Verify aligned TP-local hidden sizes preserve BF16 reference parity."""
+        for hidden in (1024, 2048, 4096):
+            self._run_parity_check(batch=2, seq=1, hidden=hidden, dtype=torch.bfloat16)
 
     def test_parity_float16(self):
         """Test parity with float16 dtype."""
