@@ -234,6 +234,7 @@ csrc/third_party/
 .cursor/
 .aider*
 .windsurf/
+.omo/
 
 # local build cache
 .vllm_ascend/
