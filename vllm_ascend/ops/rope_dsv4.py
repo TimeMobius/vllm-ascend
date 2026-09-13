@@ -3,6 +3,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
@@ -24,6 +25,26 @@ class RopeDataProxy:
     def __init__(self, data_map, is_cos=True):
         self._data = data_map
         self.idx = 0 if is_cos else 1
+
+    def pad_to(self, target_len: int, dim: int = 0) -> "RopeDataProxy":
+        """
+        Return a new proxy whose underlying tensors are padded to ``target_len`` along ``dim``.
+        """
+        new_data: dict = {}
+        for config_key, groups in self._data.items():
+            new_data[config_key] = {}
+            for group_name, (cos_t, sin_t) in groups.items():
+                pad_size = target_len - cos_t.shape[dim]
+                if pad_size > 0:
+                    ndim = cos_t.ndim
+                    pad = [0] * (2 * ndim)
+                    # F.pad pads from the last dimension backward:
+                    #   (dim_{N-1}_left, dim_{N-1}_right, ..., dim_0_left, dim_0_right)
+                    pad[-(1 + 2 * dim)] = pad_size  # right side of the target dim
+                    cos_t = F.pad(cos_t, pad)
+                    sin_t = F.pad(sin_t, pad)
+                new_data[config_key][group_name] = (cos_t, sin_t)
+        return RopeDataProxy(new_data, is_cos=(self.idx == 0))
 
     def __getitem__(self, index):
         if not isinstance(index, str):
@@ -82,9 +103,6 @@ def get_cos_and_sin_dsa(
             if group_name not in registered_groups:
                 continue
 
-            curr_cos = full_rope_cos[pos_tensor]
-            curr_sin = full_rope_sin[pos_tensor]
-
             if use_cache:
                 group_buffers = (
                     _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
@@ -98,19 +116,35 @@ def get_cos_and_sin_dsa(
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
 
+                # This is semantically equivalent to the previous
+                # `full_rope_cos[pos_tensor] / full_rope_sin[pos_tensor]`
+                # indexing followed by `copy_`; the change only combines the
+                # indexing and the write into the preallocated output buffers.
+                #
+                # gather_idx is built so torch.gather picks the same rows: each
+                # row contains the token index repeated along the rotary dim.
+                # pos_tensor -> reshape(-1, 1, 1, 1) gives each token its own
+                # row; expand() broadcasts that row across the rotary dim to
+                # match full_rope_* (which is [max_pos, 1, 1, rotary_dim]),
+                # so torch.gather(..., dim=0) selects row pos_tensor[i].
+                gather_idx = (
+                    pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_rope_cos.size(-1))
+                )
                 if draft_index is None:
-                    buf_cos[:num_tokens].copy_(curr_cos)
-                    buf_sin[:num_tokens].copy_(curr_sin)
+                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[:num_tokens])
+                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[:num_tokens])
 
                     batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
                 else:
-                    buf_cos[draft_index - 1][:num_tokens].copy_(curr_cos)
-                    buf_sin[draft_index - 1][:num_tokens].copy_(curr_sin)
+                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[draft_index - 1][:num_tokens])
+                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[draft_index - 1][:num_tokens])
                     batch_result[config_key][group_name] = (
                         buf_cos[draft_index - 1][:num_tokens],
                         buf_sin[draft_index - 1][:num_tokens],
                     )
             else:
+                curr_cos = full_rope_cos[pos_tensor]
+                curr_sin = full_rope_sin[pos_tensor]
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
     return RopeDataProxy(batch_result, is_cos=True), RopeDataProxy(batch_result, is_cos=False)

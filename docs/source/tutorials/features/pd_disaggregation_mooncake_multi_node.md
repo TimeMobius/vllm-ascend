@@ -1,10 +1,10 @@
-# Prefill-Decode Disaggregation (Deepseek)
+# Prefill-Decode Disaggregation (DeepSeek)
 
 ## Getting Started
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
+Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
@@ -25,7 +25,7 @@ Execute the following commands on each node in sequence. The results must all be
 
         ```bash
         # Check the remote switch ports
-        for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+        for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
         # Get the link status of the Ethernet ports (UP or DOWN)
         for i in {0..15}; do hccn_tool -i $i -link -g ; done
         # Check the network health status
@@ -165,7 +165,7 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -216,6 +216,64 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
+### QoS Configuration
+
+Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
+This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
+and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
+are integers in **[0, 4]** (booleans are not accepted).
+
+With the HIXL Client/Server transport, the endpoint initiating the connection
+supplies the channel QoS. The peer creates its corresponding channel using
+that received value:
+
+| Transfer mode | Initiator | Operation | QoS configuration used |
+| :--- | :--- | :--- | :--- |
+| Pull | Decoder (D) | READ KV from the prefiller | D-side `qos_priority` |
+| Push | Prefiller (P) | WRITE KV to the decoder | P-side `qos_priority` |
+
+Although KV data flows from P to D in both modes, pull uses D's QoS and push
+uses P's QoS. Configuring only the passive endpoint does not override the
+initiator's channel QoS. Both endpoints support the option, but the effective
+value for a connection comes from its initiator.
+
+For example, add `"qos_priority": 1` alongside your existing parallelism settings:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "qos_priority": 1,
+    "prefill": {"dp_size": 1, "tp_size": 2},
+    "decode": {"dp_size": 1, "tp_size": 2}
+  }
+}
+```
+
+Use `kv_producer` for the prefiller and retain the other deployment-specific
+fields in your `--kv-transfer-config`.
+
+No manual QoS environment export is required. Before initializing the transfer
+engine, the connector merges its QoS into the literal top-level JSON key
+`"comm_resource_config.qos"` in `ASCEND_GLOBAL_RESOURCE_CONFIG`, creating the
+environment variable if absent. Other resource settings and the `store`
+configuration are preserved. An explicit QoS value, or the default **1** when
+omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
+resource JSON fail before the environment is modified.
+
+The `Injected comm_resource_config.qos=...` log confirms that the local
+environment configuration was written successfully. It does not by itself
+prove that this value was used for a transfer channel. In pull mode, a passive
+P-side HIXL server may not print a local QoS parsing log; in push mode, the
+same applies to the passive D side. Check the initiator's configuration and
+HIXL channel logs to verify the channel QoS.
+
+With `MultiConnector`, set `qos_priority` in the Mooncake P/D child connector's
+`kv_connector_extra_config`. P/D injection only updates the top-level QoS key;
+it does not configure or validate pooling backends or modify their `store`
+settings. Restart the serving processes after changing P/D QoS.
+
 ### kv_port Configuration Guide
 
 On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
@@ -239,10 +297,25 @@ Use `launch_online_dp.py` to launch external dp vllm servers.
 Modify `run_dp_template.sh` on each node.
 [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
-> **Note**: If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:
->
-> 1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
-> 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
+`launch_online_dp.py` starts `dp-size-local` vLLM instances and passes seven positional arguments to `run_dp_template.sh`. The examples below correspond to [Start the service](#start-the-service).
+
+| Launcher option | Template value | Meaning | Example value | Constraints |
+| --- | --- | --- | --- | --- |
+| `--dp-size` | `$3` / `--data-parallel-size` | Total DP ranks in the group. | P: `2`; D: `32` | Positive integer; identical within the same group. Total ranks must cover `[0, dp-size)` without overlap. |
+| `--tp-size` | `$7` / `--tensor-parallel-size` | NPUs used by each instance. | P: `8`; D: `1` | Positive integer; `dp-size-local * tp-size` must not exceed available NPUs on the node.|
+| `--dp-size-local` | Number of template invocations | DP instances on this node. | P: `2`; D: `16` | If set to `-1`, it defaults to `dp-size`. Otherwise, `1 <= dp-size-local <= dp-size`.|
+| `--dp-rank-start` | `$4` / `--data-parallel-rank` = `dp-rank-start + i` | First DP rank on this node. | P: `0`; D: `0` or `16` | Non-negative integer; the assigned rank range must be within `dp-size` and not overlap. |
+| `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | The IP address must be reachable and identical within the same DP group. |
+| `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
+| `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
+| Computed by the launcher | `$1` / `ASCEND_RT_VISIBLE_DEVICES` | NPU IDs assigned to each instance. | P: `0,...,7`, `8,...,15`; D: `0` through `15` | IDs must exist and not overlap; non-contiguous IDs require adapting the launcher. |
+
+!!! note
+
+    - The launcher validates only argument types and required options. Check the remaining constraints before deployment.
+    - If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:
+        1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
+        2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
 
 #### Layerwise
 
@@ -409,6 +482,7 @@ Modify `run_dp_template.sh` on each node.
                  }
           }
       }'
+    ```
 
 === "Decoder node 2"
 
@@ -631,6 +705,7 @@ Modify `run_dp_template.sh` on each node.
                  }
           }
       }'
+    ```
 
 === "Decoder node 2"
 
@@ -758,7 +833,7 @@ We provide two different proxy implementations with distinct request routing beh
         192.0.0.4  \
       --decoder-ports  \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
     ```
 
 === "Non-layerwise"
@@ -809,17 +884,23 @@ We provide two different proxy implementations with distinct request routing beh
         192.0.0.4  \
       --decoder-ports  \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
     ```
 
-|Parameter  | meaning |
-| --- | --- |
-| --port | Proxy service Port |
-| --host | Proxy service Host IP|
-| --prefiller-hosts | Hosts of prefiller nodes |
-| --prefiller-ports | Ports of prefiller nodes |
-| --decoder-hosts | Hosts of decoder nodes |
-| --decoder-ports | Ports of decoder nodes |
+Both proxies share the following backend options.
+
+| Parameter | Applies to | Default | Example value | Meaning and constraints |
+| --- | --- | --- | --- | --- |
+| `--port` | Both | `8000` | `1999` | Proxy listen port. Must be free, reachable, and between `1` and `65535`. |
+| `--host` | Both | `localhost` | `192.0.0.1` | Proxy listen address. Layerwise mode requires a non-wildcard address reachable by D nodes. |
+| `--prefiller-hosts` | Both | `localhost` | `192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2` | P-instance hosts. Count must equal the number of `--prefiller-ports`. |
+| `--prefiller-ports` | Both | `8001` | `7100 7101 7100 7101` | P-instance ports. Each host-port pair must be unique and reachable. |
+| `--decoder-hosts` | Both | `localhost` | Sixteen `192.0.0.3`, then sixteen `192.0.0.4` | D-instance hosts. Count must equal the number of `--decoder-ports`. |
+| `--decoder-ports` | Both | `8002` | `7100`-`7115` for each D host | D-instance ports. Each host-port pair must be unique and reachable. |
+
+!!! note
+
+    The proxy scripts validate that each host list has the same length as its corresponding port list.
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -842,7 +923,7 @@ unset https_proxy
 ```
 
 - You can place your datasets in the dir: `benchmark/ais_bench/datasets`
-- You can change the configuration in the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the ``vllm_api_stream_chat.py`` for example
+- You can change the configuration in the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the `vllm_api_stream_chat.py` for example
 
 ```python
 models = [
@@ -868,7 +949,7 @@ models = [
 ]
 ```
 
-- Take gsm8k dataset for example, execute the following commands  to assess performance.
+- Take gsm8k dataset for example, execute the following commands to assess performance.
 
 ```shell
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf

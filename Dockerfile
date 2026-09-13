@@ -23,8 +23,17 @@
 #                  (rebuilt from scratch on vllm-ascend source edits but skips the
 #                  ~30 min build_aclnn.sh compile thanks to COPY --from=builder)
 
-ARG BASE_IMAGE=quay.io/ascend/cann:9.0.1-910b-ubuntu22.04-py3.12
+ARG CANN_QUAY_URL="quay.io/ascend/cann"
+ARG CANN_VERSION="9.1.0"
+ARG BASE_IMAGE=${CANN_QUAY_URL}:${CANN_VERSION}-910b-ubuntu22.04-py3.12
+
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
+ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
+ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG APTMIRROR=""
+ARG GIT_PROXY=""
+ARG PIP_TRUSTED_HOST=""
 
 # -----------------------------------------------------------------------------
 # Stage 1: build dependencies
@@ -34,16 +43,19 @@ FROM ${BASE_IMAGE} AS deps
 
 ARG PIP_INDEX_URL
 
-RUN apt-get update -y && \
+RUN if [ -n "$APTMIRROR" ]; then \
+        sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
+    fi && \
+    apt-get update -y && \
     apt-get install -y --no-install-recommends \
-        git vim wget net-tools \
+        git vim wget curl protobuf-compiler net-tools \
         gcc g++ cmake \
         numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev \
         clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     pip config set global.index-url ${PIP_INDEX_URL} && \
-    python3 -m pip install modelscope 'protobuf>3.20.0' && \
+    python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
@@ -55,7 +67,7 @@ FROM deps AS python-base
 
 ARG MOONCAKE_TAG=0.3.11.post1
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.25.1
+ARG VLLM_TAG=v0.28.0
 ARG VLLM_COMMIT=""
 
 WORKDIR /vllm-workspace
@@ -69,11 +81,12 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
     else \
+      if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -95,16 +108,45 @@ WORKDIR /vllm-workspace
 
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip install --force-reinstall --no-deps triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip install --no-cache-dir --no-deps "numpy==2.4.2" "scipy==1.13.1" && \
+    python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
+
+# Install _rust_tool_parser for the Rust frontend.
+ARG RUSTUP_DIST_SERVER
+ARG RUSTUP_UPDATE_ROOT
+ENV RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER \
+    RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT
+RUN cd /vllm-workspace/vllm && \
+    python3 -m pip install setuptools-rust && \
+    ./build_rust.sh
+
+# ===== Conditional installation based on BUILD_TYPE =====
+ARG BUILD_TYPE="release"
+ARG MEMCACHE_VERSION
+ARG MEMCACHE_DATE
+ARG MEMFABRIC_VERSION
+ARG MEMFABRIC_DATE
+ARG TORCH_NPU_VERSION
+ARG TORCH_NPU_DATE
+ARG TRITON_ASCEND_VERSION
+ARG TRITON_ASCEND_PACKAGE_VERSION
+ARG DAILY_DEPS_MODE="full"
+
+# Install daily packages via shared script
+COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
+RUN if [ "$BUILD_TYPE" = "daily" ]; then \
+        bash /tmp/install_daily_deps.sh; \
+    else \
+        echo "Building release version without daily packages"; \
+    fi && rm -f /tmp/install_daily_deps.sh
 
 # -----------------------------------------------------------------------------
 # Stage 4: final runtime image

@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from itertools import product as iprod
 from typing import Any
 
@@ -6,16 +7,24 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-def copy_snapshot_to_gpu(buffer: CpuGpuBuffer) -> torch.Tensor:
-    """Copy a pinned snapshot of a CPU buffer to its GPU buffer."""
-    cpu_snapshot = buffer.cpu.clone().pin_memory()
-    return buffer.gpu.copy_(cpu_snapshot, non_blocking=True)
+@contextmanager
+def disable_compilation(model: torch.nn.Module) -> Iterator[None]:
+    compilation_model = getattr(model, "model", model)
+    if not hasattr(compilation_model, "do_not_compile"):
+        yield
+        return
+
+    previous = compilation_model.do_not_compile
+    compilation_model.do_not_compile = True
+    try:
+        yield
+    finally:
+        compilation_model.do_not_compile = previous
 
 
 @triton.jit
