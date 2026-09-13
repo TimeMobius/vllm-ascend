@@ -48,6 +48,8 @@ class TestEnvVariables(TestBase):
                         test_vals = [member.value for member in RWKV7Observability]
                     elif var_name == "VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES":
                         test_vals = ["{}", '{"mix6":"reference"}']
+                    elif var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
+                        test_vals = ["0", "1"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     elif "bool(int(" in handler_source:
@@ -70,3 +72,23 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_kvpool_range_debug_is_strict_and_disabled_by_default(self):
+        name = "VLLM_ASCEND_KVPOOL_RANGE_DEBUG"
+        original_val = os.environ.pop(name, None)
+        try:
+            self.assertFalse(getattr(envs_ascend, name))
+            for value, expected in (("0", False), ("1", True)):
+                with self.subTest(value=value):
+                    os.environ[name] = value
+                    self.assertIs(getattr(envs_ascend, name), expected)
+            for value in ("", "2", "true", "-1"):
+                with self.subTest(invalid=value):
+                    os.environ[name] = value
+                    with self.assertRaises(ValueError):
+                        getattr(envs_ascend, name)
+        finally:
+            if original_val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original_val

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""PCP/DCP long-sequence accuracy guards.
+"""DCP and DSA-CP long-sequence accuracy guards.
 
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py`.
 """
@@ -38,17 +38,30 @@ FULL_DECODE_GRAPH = {
     "cudagraph_capture_sizes": [MAX_NUM_SEQS],
 }
 
+
 COMMON_PROMPTS = [
     "The capital of France is",
     "Hello, my name is Tom, I am",
     "The president of United States is",
 ]
 
-DSV3_2_DCP_GOLDEN = [
-    "The capital of France isoint054 Rund compasses",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
-    "The president of United States isoint054 Rund959arki",
-]
+DSV3_2_DCP_GOLDENS = (
+    [
+        "The capital of France isoint054 Rund959arki",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States isoint054 Rund959arki",
+    ],
+    [
+        "The capital of France isorrionicALLY casmith",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+    [
+        "The capital of France isorrionic Tudefeault",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+)
 
 DEEPSEEK_V4_PROMPTS = [
     "Hello, my name is",
@@ -56,6 +69,7 @@ DEEPSEEK_V4_PROMPTS = [
 ]
 
 DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", 'What is the meaning of life?",\n    "What is']
+DEEPSEEK_V4_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
 
 @dataclass(frozen=True)
@@ -107,7 +121,7 @@ FULL_FEATURE_MODEL_CASES = [
         name="dsv3_2_sfa_dcp_replicated_indexer",
         model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
         prompts=COMMON_PROMPTS,
-        expected_outputs=DSV3_2_DCP_GOLDEN,
+        expected_outputs=DSV3_2_DCP_GOLDENS,
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
@@ -115,7 +129,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_num_batched_tokens": 1024,
             "data_parallel_size": 2,
             "tensor_parallel_size": 2,
-            "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
@@ -127,8 +140,9 @@ FULL_FEATURE_MODEL_CASES = [
             "long_prefill_token_threshold": 128,
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
-                "enable_flashcomm1": True,
-                "enable_sparse_c8": True,
+                "enable_dsa_cp": True,
+                "enable_sparse_sfa_c8": True,
+                "enable_sparse_li_c8": True,
             },
             "speculative_config": {
                 "method": "mtp",
@@ -138,7 +152,7 @@ FULL_FEATURE_MODEL_CASES = [
     ),
     AccuracyCase(
         name="deepseek_v4_w4a8_dsa_cp_full_features",
-        model="gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        model=DEEPSEEK_V4_MODEL,
         prompts=DEEPSEEK_V4_PROMPTS,
         expected_outputs=DEEPSEEK_V4_GOLDEN,
         max_tokens=5,
@@ -148,7 +162,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_num_batched_tokens": 4096,
             "dtype": "auto",
             "tensor_parallel_size": 4,
-            "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 1,
             "enable_expert_parallel": True,
             "gpu_memory_utilization": 0.9,
@@ -159,12 +172,63 @@ FULL_FEATURE_MODEL_CASES = [
                 "cudagraph_mode": "FULL_DECODE_ONLY",
             },
             "additional_config": {
-                "enable_flashcomm1": True,
                 "enable_dsa_cp": True,
             },
         },
     ),
 ]
+
+
+@pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="dsa_cp",
+    parallel="TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W4A8",
+    graph_mode="eager",
+)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
+    prompt_lengths = [1, 3, 4095, 4096, 4097]
+    generated_tokens: dict[bool, list[int]] = {}
+
+    for enable_dsa_cp in (False, True):
+        mode_tokens = []
+        with DPVllmRunner(
+            DEEPSEEK_V4_MODEL,
+            max_model_len=8192,
+            max_num_seqs=16,
+            max_num_batched_tokens=8192,
+            dtype="auto",
+            data_parallel_size=2,
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enforce_eager=True,
+            additional_config={"enable_dsa_cp": enable_dsa_cp},
+        ) as runner:
+            for prompt_length in prompt_lengths:
+                prompt_tokens = [(index % 1000) + 100 for index in range(prompt_length)]
+                output_ids, _ = runner.generate_greedy([prompt_tokens], max_tokens=1)[0]
+                assert output_ids[:prompt_length] == prompt_tokens
+                assert len(output_ids) == prompt_length + 1
+                mode_tokens.append(output_ids[-1])
+        generated_tokens[enable_dsa_cp] = mode_tokens
+
+    assert generated_tokens[True] == generated_tokens[False]
 
 
 @patch.dict(
@@ -176,5 +240,5 @@ FULL_FEATURE_MODEL_CASES = [
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
-def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
+def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)

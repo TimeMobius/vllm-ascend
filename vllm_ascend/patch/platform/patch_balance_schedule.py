@@ -78,6 +78,16 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.ascend_config import init_ascend_config
+
+# vLLM main added KVConnectorBlockState for connector block snapshots; v0.28.0
+# does not ship it. Import optionally so CI rebase onto main does not break the
+# release lane at module import time.
+try:
+    from vllm.v1.core.sched.output import KVConnectorBlockState
+except ImportError:  # pragma: no cover - exercised on v0.28.0
+    KVConnectorBlockState = None  # type: ignore[misc, assignment]
+
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
     # Primary source of truth is AscendConfig. The additional_config fallback
@@ -121,6 +131,15 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
+        short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
+        if short_request_first_config.enabled:
+            from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
+
+            install_short_request_first_waiting_queue(
+                self,
+                threshold=short_request_first_config.threshold,
+                long_max_wait_ms=short_request_first_config.long_max_wait_ms,
+            )
         self._balance_enabled = _balance_scheduling_enabled(vllm_config)
         # Injected by BalanceDPEngineCoreProc._has_global_unfinished_reqs
         # before the first gather. Only used on the enabled path (balance
@@ -429,7 +448,6 @@ class BalanceScheduler(Scheduler):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
-                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -465,17 +483,11 @@ class BalanceScheduler(Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                            request
-                        )
-
-                    # In case of hybrid models, obtain hint for Marconi-style APC logic
-                    if self.has_mamba_layers:
-                        num_uncached_common_prefix_tokens = getattr(
-                            self.kv_cache_manager.coordinator,
-                            "num_uncached_common_prefix_tokens",
-                            0,
-                        )
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                        ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -583,7 +595,6 @@ class BalanceScheduler(Scheduler):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
@@ -768,6 +779,29 @@ class BalanceScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Drain every step, including without a connector, to avoid stale
+        # Mamba boundary offers. Snapshot exact current block tables for the
+        # connector before building its metadata. (vLLM main only)
+        kv_connector_block_state = None
+        if KVConnectorBlockState is not None:
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                snapshot_req_ids = {req.req_id for req in new_reqs_data}
+                snapshot_req_ids.update(
+                    req_id
+                    for req_id, block_ids in zip(
+                        cached_reqs_data.req_ids,
+                        cached_reqs_data.new_block_ids,
+                        strict=True,
+                    )
+                    if block_ids
+                )
+                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
+
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
@@ -777,7 +811,7 @@ class BalanceScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        scheduler_output = SchedulerOutput(
+        scheduler_output_kwargs = dict(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -795,6 +829,9 @@ class BalanceScheduler(Scheduler):
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+        if KVConnectorBlockState is not None:
+            scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -808,6 +845,10 @@ class BalanceScheduler(Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+
+        # Connector-only block state must not be dispatched to workers.
+        if KVConnectorBlockState is not None:
+            scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
@@ -869,10 +910,10 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 
 
 # The scheduler is constructed as ``Scheduler(...)`` from
-# ``vllm.v1.core.sched.scheduler``. This only takes effect when scheduler_cls
-# is unset (the PD-mixed balance path); vllm-ascend's recompute / dynamic-batch
-# / profiling schedulers set scheduler_cls and bypass this name, which is
-# correct -- balance scheduling (PD-mixed) must not touch those configs.
+# ``vllm.v1.core.sched.scheduler``. This takes effect when scheduler_cls is
+# unset, covering ordinary synchronous, PD-prefill, and PD-mixed paths.
+# vLLM-Ascend's recompute, dynamic-batch, and profiling schedulers set
+# scheduler_cls and correctly bypass this name.
 _sched_mod.Scheduler = BalanceScheduler
 
 # Activate BalanceDPEngineCoreProc ONLY when balance scheduling is enabled.

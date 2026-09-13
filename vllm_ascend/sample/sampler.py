@@ -1,4 +1,5 @@
 import torch
+import torch_npu
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
@@ -8,26 +9,13 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_custom_op,
-    get_ascend_device_type,
-    global_stream,
-    npu_stream_switch,
-)
+from vllm_ascend.utils import global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 _SAMPLING_EPS = 1e-5
-
-# Ensure the _C_ascend extension is loaded at import time so that
-# torch.ops._C_ascend.npu_apply_top_k_top_p is registered before any
-# sampling path can reach it. Without this, RWKV7 (which does not
-# trigger the RMSNorm/quant fusion pass that normally calls
-# enable_custom_op) can hit AttributeError on the first non-greedy
-# sampling request in the EngineCore subprocess.
-enable_custom_op()
 
 
 def random_sample(
@@ -53,6 +41,7 @@ def random_sample(
             for i, generator in generators.items():
                 q[i].exponential_(generator=generator)
     torch.npu.current_stream().wait_stream(global_stream())
+    q.record_stream(torch.npu.current_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
@@ -246,7 +235,7 @@ def _apply_top_k_top_p_pytorch(
         return logits
 
 
-def _apply_top_k_top_p_ascendc(
+def _apply_top_k_top_p_torch_npu(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -268,18 +257,19 @@ def _apply_top_k_top_p_ascendc(
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
-            enable_custom_op()
-            gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
+            gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
         return gathered_vals, gathered_idx
 
+    # Non-reduce_sample mode: use sort-based pytorch implementation.
+    # npu_top_k_top_p degrades severely (5-28ms) when k is large or batch
+    # contains mixed k values, while sort+mask is consistently ~1ms.
     if p is None and k is None:
         return logits
-    enable_custom_op()
-    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
+    return _apply_top_k_top_p_pytorch(logits, k, p)
 
 
 apply_top_k_top_p = (
-    _apply_top_k_top_p_ascendc
-    if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
+    _apply_top_k_top_p_torch_npu
+    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P)
     else _apply_top_k_top_p_pytorch
 )

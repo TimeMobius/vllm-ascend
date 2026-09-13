@@ -33,6 +33,8 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 > Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
 
+For doctests, run the **Doc Test** workflow manually in GitHub Actions, or let a relevant PR change trigger it automatically. See [Run doctest](../developer_guide/contribution/testing.md#run-doctest) for supported cases and local commands.
+
 Tests are run against both the community vLLM version and the latest release.
 
 ### `/nightly`
@@ -139,14 +141,39 @@ Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g.,
 
 ### `/rerun`
 
-Re-run all failed workflow runs on the current PR commit. Useful when CI jobs failed due to infrastructure issues.
+Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
+
+Only jobs that did not complete successfully are re-run (failed, cancelled, timed out, or startup-failed). Jobs that already succeeded are left untouched. Runs with `cancelled` / `timed_out` / `startup_failure` conclusions are re-run per remaining job, and runs whose failure also contains cancelled jobs (e.g. a vLLM matrix leg cancelled by fail-fast) are handled the same way. Tests executed through reusable workflows (e.g. `Selected Tests`) are re-run via their caller job and are not duplicated.
 
 **Examples:**
 
 ```text
-# Re-run all failed CI workflows on this PR
+# Re-run failed / cancelled CI jobs on this PR
 /rerun
 ```
+
+### `/cancel`
+
+Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
+
+**Scope:**
+
+| Cancelled | Not cancelled |
+|---|---|
+| `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
+| `schedule_doctest.yaml` | `/rerun` command runs |
+| `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
+| `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
+| `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |
+
+**Examples:**
+
+```text
+# Force-cancel all CI runs on this PR
+/cancel
+```
+
+> Note: This uses the `force-cancel` API endpoint, which can cancel runs even when they are in a pending or queued state waiting for runners.
 
 ## Behavior
 
@@ -160,6 +187,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
+| `/cancel` | ✅ | ❌ |
 | `/cherry-pick` | ✅ | ❌ |
 | `/revert` | ✅ | ❌ |
 | `/nightly` | ✅ | ❌ |
@@ -170,6 +198,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
+| `/cancel` | PR author, or users with triage+ permission on the repository |
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |

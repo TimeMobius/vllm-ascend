@@ -4,8 +4,9 @@
 These tests watch the upstream vLLM surfaces that ``patch_balance_schedule.py``
 depends on. If upstream changes any of them in a way that would silently break
 the patch (or stop it from taking effect), CI turns red here so we notice and
-sync. They are NOT behavior/equivalence tests -- those need a running DP+MoE
-engine on NPU and live under e2e/nightly.
+sync. They also include a lightweight CPU scheduler-path smoke test; full
+behavior/equivalence tests still need a running DP+MoE engine on NPU and live
+under e2e/nightly.
 
 What is guarded here (everything reachable from CPU UT):
 
@@ -17,9 +18,12 @@ What is guarded here (everything reachable from CPU UT):
 * upstream ``run_engine_core`` still instantiates ``DPEngineCoreProc`` by
   module-global name -- the whole reason we can swap the module-level symbol
   instead of copying ``run_engine_core``;
-* the module-level class swaps actually took effect;
+* the module-level class swaps and the DyntraLB -> balance wrapper chain
+  actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
+* the Mamba-aligned waiting path can schedule a request through the real
+  upstream helper without an argument mismatch;
 * the 3 balance deltas remain present in ``schedule()`` (intent lock);
 * the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
   at vllm-ascend's pinned vLLM release tag (read from
@@ -43,18 +47,29 @@ import subprocess
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 # Capture the upstream originals BEFORE importing the patch: importing the patch
 # mutates the module-level ``Scheduler`` / ``DPEngineCoreProc`` symbols, so grab
 # the pristine classes/file paths first.
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
-from vllm.v1.core.sched.scheduler import Scheduler as _UpstreamScheduler
+from vllm.model_executor.models import ModelRegistry
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
+from vllm.v1.structured_output import StructuredOutputManager
+
+from tests.ut.kv_offload.utils import create_request, create_vllm_config
+from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -73,12 +88,19 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #   EngineCoreProc.run_engine_core = _balance_run_engine_core            (eager)
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
 #       swapped inside _balance_run_engine_core only when balance is enabled)
+from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_run_engine_core,
     _balance_scheduling_enabled,
     _OriginalRunEngineCore,
 )
+
+# Importing any vLLM module can activate the Ascend platform plugin before this
+# test module finishes importing, so a direct ``Scheduler`` import may already
+# resolve to ``BalanceScheduler``. Its base class is the installed upstream
+# scheduler and remains unmodified by the BalanceScheduler class replacement.
+_UpstreamScheduler = BalanceScheduler.__bases__[0]
 
 # ---------------------------------------------------------------------------
 # Scheduler config compatibility
@@ -122,6 +144,194 @@ def test_balance_config_fallback_accepts_legacy_top_level_config():
 
     with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
         assert _balance_scheduling_enabled(vllm_config) is True
+
+
+@pytest.mark.parametrize("balance_enabled", [False, True])
+def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balance_enabled):
+    def fake_scheduler_init(self, *args, **kwargs):
+        del kwargs
+        self.vllm_config = args[0]
+        self.policy = SchedulingPolicy.FCFS
+        self.waiting = create_request_queue(self.policy)
+        self.skipped_waiting = create_request_queue(self.policy)
+
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=balance_enabled,
+            short_request_first_config=SimpleNamespace(
+                enabled=True,
+                threshold=256,
+                long_max_wait_ms=0.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=ascend_config,
+        ),
+    ):
+        scheduler = BalanceScheduler(
+            SimpleNamespace(
+                additional_config={},
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            MagicMock(),
+            MagicMock(),
+            16,
+        )
+
+    assert isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
+    assert scheduler._balance_enabled is balance_enabled
+
+
+def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
+    def fake_scheduler_init(self, *args, **kwargs):
+        del kwargs
+        self.vllm_config = args[0]
+        self.policy = SchedulingPolicy.FCFS
+        self.waiting = create_request_queue(self.policy)
+
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=False,
+            short_request_first_config=SimpleNamespace(enabled=False),
+        )
+    )
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch("builtins.__import__", wraps=__import__) as import_mock,
+    ):
+        scheduler = BalanceScheduler(
+            SimpleNamespace(
+                additional_config={},
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            MagicMock(),
+            MagicMock(),
+            16,
+        )
+
+    assert not any(
+        call.args[0] == "vllm_ascend.core.short_request_first_scheduler" for call in import_mock.call_args_list
+    )
+    assert not isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
+
+
+def test_mamba_waiting_path_schedules_without_argument_mismatch():
+    """Run the balance waiting path through the real upstream Mamba helper."""
+    block_size = 4
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=True,
+            short_request_first_config=SimpleNamespace(enabled=False),
+        )
+    )
+    model_info = SimpleNamespace(
+        architecture="OPTForCausalLM",
+        is_text_generation_model=True,
+        is_pooling_model=False,
+        attn_type="decoder",
+        default_seq_pooling_type=None,
+        default_tok_pooling_type=None,
+        score_type=None,
+        supports_multimodal=False,
+        supports_multimodal_raw_input_only=False,
+        requires_raw_input_tokens=False,
+        supports_multimodal_encoder_tp_data=False,
+        supports_pp=True,
+        has_inner_state=False,
+        is_attention_free=False,
+        is_hybrid=False,
+        has_noops=False,
+        supports_mamba_prefix_caching=False,
+        supports_replayssm=False,
+        supports_transcription=False,
+        supports_transcription_only=False,
+        supported_video_pruning_methods=(),
+    )
+    with (
+        patch.object(
+            ModelRegistry,
+            "inspect_model_cls",
+            return_value=(model_info, model_info.architecture),
+        ),
+        patch(
+            "vllm_ascend.platform.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch("vllm_ascend.logger.configure_ascend_file_logging"),
+    ):
+        vllm_config = create_vllm_config(
+            max_num_seqs=2,
+            max_num_batched_tokens=16,
+            block_size=block_size,
+        )
+    vllm_config.additional_config = {"scheduler_config": {"enable_balance_scheduling": True}}
+    # Exercise non-PD Mamba alignment without the KV consumer bypass.
+    vllm_config.kv_transfer_config = None
+    vllm_config.cache_config.num_gpu_blocks = 64
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=ascend_config,
+        ),
+    ):
+        scheduler = BalanceScheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            block_size=block_size,
+        )
+
+    # Exercise the exact branch involved in the regression without requiring
+    # an NPU or a remote KV backend.
+    scheduler.connector = None
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.has_mamba_layers = True
+    scheduler.mamba_partial_cache_hit = False
+    request = create_request(
+        request_id=1,
+        num_tokens=6,
+        max_tokens=1,
+        block_size=block_size,
+    )
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler_output.num_scheduled_tokens[request.request_id] == block_size
+    assert request in scheduler.running
 
 
 # ---------------------------------------------------------------------------
@@ -350,13 +560,14 @@ def test_upstream_run_engine_core_instantiates_dp_proc_by_name():
 # ---------------------------------------------------------------------------
 
 
-def test_module_level_swaps_take_effect():
-    """The patch rebinds ``Scheduler`` eagerly and installs the
-    ``run_engine_core`` wrapper eagerly, but DEFERS the ``DPEngineCoreProc``
-    swap to wrapper-call-time (conditional on balance being enabled), so that
-    balance does not touch configs that don't use it (e.g. PD-disaggregated
-    recompute). At import time the engine-core class must therefore still be
-    the pristine upstream one, and the wrapper must be installed.
+def test_module_level_swaps_and_wrapper_chain_take_effect():
+    """The balance patch rebinds ``Scheduler`` eagerly and installs its
+    ``run_engine_core`` wrapper, while the subsequently loaded DyntraLB patch
+    becomes the outer wrapper. DyntraLB delegates to the balance wrapper when
+    disabled; the two features are rejected by configuration validation when
+    both are enabled. The ``DPEngineCoreProc`` swap remains deferred until the
+    selected wrapper runs, so at import time the engine-core class must still
+    be the pristine upstream one.
     (``Scheduler`` propagating into ``vllm.v1.engine.core.Scheduler``
     additionally depends on the platform patch loading before engine.core is
     imported -- that ordering is enforced by the platform patch system and is
@@ -371,8 +582,11 @@ def test_module_level_swaps_take_effect():
         "patch swapped vllm.v1.engine.core.DPEngineCoreProc at import time; "
         "the swap must be deferred to run_engine_core entry (conditional)."
     )
-    assert _UpstreamEngineCoreProc.run_engine_core is _balance_run_engine_core, (  # type: ignore[comparison-overlap]
-        "patch did not install the _balance_run_engine_core wrapper on EngineCoreProc.run_engine_core"
+    assert _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
+        "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
+    )
+    assert _dyntra_patch._PreviousRunEngineCore is _balance_run_engine_core, (
+        "DyntraLB must delegate to the balance wrapper when DyntraLB is disabled"
     )
 
 
