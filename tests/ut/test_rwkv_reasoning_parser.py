@@ -1,6 +1,6 @@
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm_ascend.reasoning.rwkv_reasoning_parser import RWKVReasoningParser
 
 
