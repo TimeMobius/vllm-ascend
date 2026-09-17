@@ -10,8 +10,10 @@ from typing import Final
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs_vllm
 from torch import nn
 from transformers.activations import ACT2FN as HF_ACT2FN
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
@@ -63,6 +65,11 @@ _RWKV7_CONFIG = envs.resolve_rwkv7_config()
 
 LOG_DECAY_SCALE = -0.6065306597126334
 RWKV7_RUNTIME_DTYPE = torch.float32
+# Experimental RWKV7 integrations retained for validation. They are disabled
+# by default: explicit opt-in currently crashes deep in capture/model-state
+# setup, so validation rejects it early with a clear NotImplementedError.
+_RWKV7_BREAKABLE_CUDAGRAPH_SUPPORTED: Final = False
+_RWKV7_MRV2_SUPPORTED: Final = False
 EPILOGUE_ROWS_CANDIDATES: Final = (1, 2, 4, 8, 16)
 EPILOGUE_ROWS_CALIBRATED_HEADS: Final = 16
 # Each tuple is (ROWS, polynomial coefficients), fitted from the NPU sweep in
@@ -446,6 +453,7 @@ def _rwkv7_cache_all_packed_checkpoint_metadata(
     )
 
 
+@eager_break_during_capture
 def rwkv7_attention(
     hidden_states: torch.Tensor,
     cached_shift_state: torch.Tensor,
@@ -498,6 +506,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 def rwkv7_block_forward(
     hidden_states: torch.Tensor,
     v_first: torch.Tensor,
@@ -1994,7 +2003,35 @@ class RWKV7Block(nn.Module, MambaBase):
         return output, v_first_out
 
 
-def _rwkv7_should_compile(vllm_config) -> bool:
+def _validate_rwkv7_experimental_gates(vllm_config: VllmConfig) -> None:
+    """Reject experimental RWKV7 integrations before they crash deep in setup.
+
+    Breakable CUDAGraph capture and the MRV2 model-state route are retained for
+    validation, but RWKV7 fails late: breakable capture does not proxy
+    ``set_attn_backend``, and MRV2 relies on unverified FULL_AND_PIECEWISE
+    compilation and state contracts. Fail at the earliest compile/model-load
+    decision boundary so operators get a clear error instead of a deep crash.
+    """
+    if (
+        envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH
+        and not _RWKV7_BREAKABLE_CUDAGRAPH_SUPPORTED
+    ):
+        raise NotImplementedError(
+            "RWKV7 does not support VLLM_USE_BREAKABLE_CUDAGRAPH: the breakable "
+            "capture does not proxy set_attn_backend, so capture fails in the "
+            "model runner. Unset VLLM_USE_BREAKABLE_CUDAGRAPH to use the default "
+            "graph mode."
+        )
+    if vllm_config.use_v2_model_runner and not _RWKV7_MRV2_SUPPORTED:
+        raise NotImplementedError(
+            "RWKV7 does not support the v2 model runner (VLLM_USE_V2_MODEL_RUNNER): "
+            "its FULL_AND_PIECEWISE compilation and model-state contracts are not "
+            "verified. Unset VLLM_USE_V2_MODEL_RUNNER to use the default model runner."
+        )
+
+
+def _rwkv7_should_compile(vllm_config: VllmConfig) -> bool:
+    _validate_rwkv7_experimental_gates(vllm_config)
     return not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
 
 
