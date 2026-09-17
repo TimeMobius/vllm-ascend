@@ -17,6 +17,10 @@ from vllm_ascend.model_executor.warmup.rejection_sampler_triton_warmup import (
     rejection_sampler_triton_warmup,
 )
 from vllm_ascend.model_executor.warmup.rms_triton_warmup import triton_rms_warmup
+from vllm_ascend.model_executor.warmup.rwkv7_triton_warmup import (
+    model_uses_rwkv7,
+    rwkv7_triton_warmup,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker
@@ -44,6 +48,8 @@ def kernel_warmup(worker: NPUWorker) -> None:
     _run_warmup("rejection_sampler", rejection_sampler_triton_warmup, worker)
     _run_warmup("penalties", penalties_triton_warmup, worker)
     _run_warmup("rms", triton_rms_warmup, worker)
+    if model_uses_rwkv7(worker.vllm_config.model_config):
+        _run_warmup("rwkv7", rwkv7_triton_warmup, worker)
 
     elapsed = time.perf_counter() - start
     logger.info("Triton kernel warmup finished in %.3fs.", elapsed)
