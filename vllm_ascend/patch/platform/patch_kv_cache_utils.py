@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from typing import Final
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -22,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend import envs
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -76,6 +78,68 @@ def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
 
 
+_MAMBA_FINE_GRAINED_PREFIX_CACHE_WORKER_COPY_SUPPORTED: Final = False
+
+
+def _single_group_mamba_fine_grained_hash_block_size(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+) -> int | None:
+    """Opt-in hash granularity for a standalone single-group Mamba model.
+
+    Upstream fixes ``hash_block_size == scheduler block size`` for a single KV
+    cache group (``UnitaryKVCacheCoordinator`` asserts it), so a finer hash is
+    only reachable through this explicitly gated path. Returns ``None`` -- the
+    baseline behavior -- unless every guard holds.
+    """
+    if not envs.VLLM_ASCEND_ENABLE_MAMBA_FINE_GRAINED_PREFIX_CACHE:
+        return None
+    if not _MAMBA_FINE_GRAINED_PREFIX_CACHE_WORKER_COPY_SUPPORTED:
+        logger.warning_once(
+            "VLLM_ASCEND_ENABLE_MAMBA_FINE_GRAINED_PREFIX_CACHE is set but the "
+            "fine-grained single-group Mamba prefix cache is currently "
+            "unsupported: its list-valued recurrent state copy-on-write path is "
+            "not handled by the worker state copy, so it would fail after the "
+            "scheduler hands out block copies; keeping block-aligned prefix "
+            "caching instead."
+        )
+        return None
+    groups = kv_cache_config.kv_cache_groups
+    if len(groups) != 1:
+        return None
+    if getattr(vllm_config, "kv_transfer_config", None) is not None:
+        return None
+    if vllm_config.parallel_config.decode_context_parallel_size != 1:
+        return None
+    cache_config = vllm_config.cache_config
+    if not cache_config.enable_prefix_caching:
+        return None
+    prefix_match_unit = cache_config.prefix_match_unit
+    if prefix_match_unit is None:
+        logger.warning_once(
+            "VLLM_ASCEND_ENABLE_MAMBA_FINE_GRAINED_PREFIX_CACHE is set but "
+            "--prefix-match-unit is not; keeping block-aligned prefix caching."
+        )
+        return None
+    spec = groups[0].kv_cache_spec
+    if not isinstance(spec, MambaSpec) or spec.mamba_cache_mode != "align":
+        return None
+    # The scheduler block size stays the mamba block size on this path; a
+    # decoupled --mamba-block-size would violate the coordinator divisibility
+    # contract and is deliberately left on the baseline path.
+    if cache_config.block_size != spec.block_size:
+        return None
+    if prefix_match_unit >= spec.block_size or spec.block_size % prefix_match_unit != 0:
+        logger.warning_once(
+            "Ignoring --prefix-match-unit=%d for the single Mamba group: it must "
+            "be a divisor of the Mamba block size (%d) smaller than it.",
+            prefix_match_unit,
+            spec.block_size,
+        )
+        return None
+    return int(prefix_match_unit)
+
+
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -89,6 +153,11 @@ def _ascend_resolve_kv_cache_block_sizes(
 
     For multiple KV cache groups with DCP, compute scheduler_block_size as
     lcm(group_block_sizes) * dcp to maintain alignment.
+
+    A single Mamba "align" group may additionally opt into a finer
+    ``hash_block_size`` through
+    ``VLLM_ASCEND_ENABLE_MAMBA_FINE_GRAINED_PREFIX_CACHE``; see
+    ``_single_group_mamba_fine_grained_hash_block_size``.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -96,6 +165,9 @@ def _ascend_resolve_kv_cache_block_sizes(
 
     if len(groups) <= 1:
         bs = cache_config.block_size * dcp
+        fine_grained_hash_block_size = _single_group_mamba_fine_grained_hash_block_size(kv_cache_config, vllm_config)
+        if fine_grained_hash_block_size is not None:
+            return bs, fine_grained_hash_block_size
         return bs, bs
 
     group_block_sizes = [group.kv_cache_spec.block_size for group in groups]
