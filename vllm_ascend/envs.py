@@ -141,6 +141,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Opt-in fine-grained prefix caching for standalone single-group Mamba
+    # "align" models (RWKV7). Retained for validation only: the code path is
+    # currently unsupported and disabled by default regardless of this flag.
+    # When set, the resolver emits one warning naming the unsupported
+    # list-valued recurrent state CoW and falls back to today's block-aligned
+    # behavior (a single KV cache group maps to ``UnitaryKVCacheCoordinator``
+    # with ``hash_block_size == mamba block size``). The retained finer-hash
+    # implementation remains behind an internal support gate until worker-side
+    # state copies handle list-valued recurrent caches. Valid values: 0 or 1.
+    # This configuration is not sensitive.
+    "VLLM_ASCEND_ENABLE_MAMBA_FINE_GRAINED_PREFIX_CACHE": lambda: _strict_binary_env(
+        "VLLM_ASCEND_ENABLE_MAMBA_FINE_GRAINED_PREFIX_CACHE"
+    ),
 }
 
 # end-env-vars-definition

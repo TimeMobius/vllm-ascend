@@ -48,7 +48,7 @@ class TestEnvVariables(TestBase):
                         test_vals = [member.value for member in RWKV7Observability]
                     elif var_name == "VLLM_ASCEND_RWKV7_OPERATOR_OVERRIDES":
                         test_vals = ["{}", '{"mix6":"reference"}']
-                    elif var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
+                    elif "_strict_binary_env" in handler_source:
                         test_vals = ["0", "1"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
