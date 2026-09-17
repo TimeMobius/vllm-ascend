@@ -291,4 +291,3 @@ def test_enabled_block_forward_is_a_capture_break_point(monkeypatch):
     layer._forward_runtime.assert_called_once()
     torch.testing.assert_close(output, expected_out)
     torch.testing.assert_close(v_first_out, expected_v_first)
-
