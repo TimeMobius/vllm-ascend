@@ -36,8 +36,15 @@ def init_asecnd_model_state(
         cls = model.get_model_state_cls()
         return cls(vllm_config, model, encoder_cache, device)
 
+    # Upstream ``resolve_model_state_cls`` treats attention-free models (pure
+    # Mamba / linear attention such as RWKV7) exactly like hybrids: both own
+    # recurrent state that needs preprocess/postprocess and prefix-cache state
+    # copies. RWKV7 declares ``IsAttentionFree`` but not ``IsHybrid``, so
+    # checking only ``is_hybrid`` silently dropped it onto the attention
+    # ``AscendModelState``.
+    #
     # 310P uses Triton-free states under ``vllm_ascend._310p.worker.v2.model_state``.
-    if vllm_config.model_config.is_hybrid:
+    if vllm_config.model_config.is_hybrid or vllm_config.model_config.is_attention_free:
         if is_310p():
             from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState
 

@@ -550,3 +550,86 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
         encoder_cache,
         device,
     )
+
+
+def test_rwkv7_declares_attention_free_not_hybrid():
+    from vllm_ascend.models.rwkv7 import RWKV7ForCausalLM
+
+    # Given/Then: upstream routes attention-free and hybrid models to a Mamba
+    # state; RWKV7 must expose the attention-free half of that contract.
+    assert RWKV7ForCausalLM.is_attention_free is True
+    assert getattr(RWKV7ForCausalLM, "is_hybrid", False) is False
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.AscendMambaHybridModelState")
+def test_attention_free_model_selects_mamba_state_when_not_hybrid(mock_mamba_state):
+    # Given: a pure linear-attention model like RWKV7 (attention-free, not hybrid).
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    vllm_config.model_config.is_attention_free = True
+    model = torch.nn.Module()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    # When: MRv2 resolves the model state.
+    state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    # Then: the Mamba state owns the recurrent lifecycle.
+    assert state is mock_mamba_state.return_value
+    mock_mamba_state.assert_called_once_with(
+        vllm_config,
+        model,
+        encoder_cache,
+        device,
+    )
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.AscendMambaHybridModelState")
+@patch("vllm_ascend.worker.v2.model_states.default.AscendModelState")
+def test_attention_free_model_does_not_fall_back_to_attention_state(mock_default_state, mock_mamba_state):
+    # Given: an attention-free model that is not hybrid.
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    vllm_config.model_config.is_attention_free = True
+    model = torch.nn.Module()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    # When: MRv2 resolves the model state.
+    state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    # Then: the attention default state, which skips Mamba preprocessing, is
+    # never constructed, and the Mamba state is.
+    mock_default_state.assert_not_called()
+    assert state is mock_mamba_state.return_value
+
+
+@patch("vllm_ascend.worker.v2.model_states.default.AscendModelState")
+def test_plain_attention_model_still_selects_default_state(mock_default_state):
+    # Given: an ordinary attention model (neither hybrid nor attention-free).
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    vllm_config.model_config.is_attention_free = False
+    model = torch.nn.Module()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    # When: MRv2 resolves the model state.
+    state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    # Then: the default attention state is used.
+    assert state is mock_default_state.return_value
+
+
+def test_mrv2_block_tables_install_ascend_slot_mapping():
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+    from vllm.v1.worker.gpu.block_table import BlockTables
+
+    from vllm_ascend.patch.worker.patch_v2 import patch_block_table  # noqa: F401
+    from vllm_ascend.worker.v2.block_table import AscendBlockTables
+
+    # Given/Then: the MRv2 patch swaps in the Triton slot-mapping kernel that
+    # reconstructs slot_mappings on device for every model state, including the
+    # RWKV7 Mamba state.
+    assert gpu_model_runner.BlockTables is AscendBlockTables
+    assert AscendBlockTables.compute_slot_mappings is not BlockTables.compute_slot_mappings

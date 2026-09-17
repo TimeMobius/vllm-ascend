@@ -400,6 +400,28 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
 
 
+def _is_single_mamba_partial_hash_config(
+    kv_cache_config: KVCacheConfig,
+    hash_block_size: int,
+    dcp_world_size: int,
+    scheduler_block_size: int | None,
+) -> bool:
+    """Whether a lone Mamba "align" group runs the partial-hash-hit path.
+
+    Only reachable when the finer ``hash_block_size`` opt-in is active; the
+    single-group baseline keeps ``hash_block_size`` equal to the block size and
+    stays on ``UnitaryKVCacheCoordinator``. The upstream
+    ``HybridKVCacheCoordinator`` is the implementation that computes
+    ``enable_partial_hash_hits`` and forwards the hash-granular alignment to its
+    Mamba manager, so this config must bypass the unitary branch.
+    """
+    groups = kv_cache_config.kv_cache_groups
+    if len(groups) != 1 or dcp_world_size != 1 or scheduler_block_size is None:
+        return False
+    spec = groups[0].kv_cache_spec
+    return isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align" and hash_block_size < spec.block_size
+
+
 def get_kv_cache_coordinator(  # type: ignore[misc]
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
@@ -435,6 +457,24 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             max_in_flight_tokens=token_budget,
             max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
+            num_prefill_lookahead=num_prefill_lookahead,
+        )
+
+    if enable_caching and _is_single_mamba_partial_hash_config(
+        kv_cache_config, hash_block_size, dcp_world_size, scheduler_block_size
+    ):
+        return HybridKVCacheCoordinator(  # type: ignore[call-arg]
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            max_in_flight_tokens=token_budget,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=1,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
 
