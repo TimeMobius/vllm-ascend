@@ -737,6 +737,19 @@ class NPUModelRunner310(NPUModelRunner):
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
             for layer_name in group_kv_cache_spec.layer_names:
                 layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
+
+        # Dispatch by spec type (not by name substring): some mamba-like
+        # models (e.g. RWKV7) expose their state layers under plain
+        # "model.layers.N" names without "linear_attn"/"attn" markers.
+        def _spec_of(name: str) -> KVCacheSpec | None:
+            return layer_kv_cache_spec.get(name)
+
+        def _is_mamba_layer(name: str) -> bool:
+            return isinstance(_spec_of(name), MambaSpec)
+
+        def _is_attn_layer(name: str) -> bool:
+            return isinstance(_spec_of(name), AttentionSpec)
+
         # Allocate kv cache buffers according to the kv_cache_config and kv_cache_spec
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
@@ -744,7 +757,7 @@ class NPUModelRunner310(NPUModelRunner):
                 layer_name = shared_names[idx]
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                if "linear_attn" in layer_name and layer_name not in kv_cache:
+                if _is_mamba_layer(layer_name) and layer_name not in kv_cache:
                     cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(cache_spec, MambaSpec)
                     # vLLM #51718 packs all group layers into one tensor on main;
@@ -771,13 +784,13 @@ class NPUModelRunner310(NPUModelRunner):
                             start_idx = target_idx
                             state_tensors.append(tensor)
                         for layer_name_inner in shared_names:
-                            if "linear_attn" in layer_name_inner:
+                            if _is_mamba_layer(layer_name_inner):
                                 kv_cache[layer_name_inner] = state_tensors
                     else:
                         # main: every layer owns its own region; allocate private
                         # state tensors per layer so blocks don't collide.
                         for layer_name_inner in shared_names:
-                            if "linear_attn" in layer_name_inner:
+                            if _is_mamba_layer(layer_name_inner):
                                 raw_tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
                                 state_tensors = []
                                 target_idx = 0
@@ -789,7 +802,7 @@ class NPUModelRunner310(NPUModelRunner):
                                     start_idx = target_idx
                                     state_tensors.append(tensor)
                                 kv_cache[layer_name_inner] = state_tensors
-                elif "attn" in layer_name and layer_name not in kv_cache:
+                elif _is_attn_layer(layer_name) and layer_name not in kv_cache:
                     kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(kv_cache_spec, AttentionSpec)
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
@@ -831,13 +844,13 @@ class NPUModelRunner310(NPUModelRunner):
                         )
                         for layer_name_inner in shared_names:
                             # shared the kvcache between the self_attn specs in the same group
-                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                            if _is_attn_layer(layer_name_inner):
                                 kv_cache[layer_name_inner] = (k_cache, v_cache)
                     else:
                         # main: every layer owns its own region; give each layer a
                         # private (k, v) so block indices don't collide across layers.
                         for layer_name_inner in shared_names:
-                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                            if _is_attn_layer(layer_name_inner):
                                 kv_cache[layer_name_inner] = (
                                     torch_npu.empty_with_format(
                                         size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
