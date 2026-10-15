@@ -125,6 +125,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_RWKV7_DISABLE_TRITON": lambda: int(
         os.getenv("VLLM_ASCEND_RWKV7_DISABLE_TRITON", "0")
     ),
+    # RWKV7 group-norm implementation. 0 (default, auto): reference
+    # mean/var/affine decomposition on 310P, where the fused group_norm
+    # kernel leaves part of the output buffer unwritten; fused F.group_norm
+    # elsewhere. 1: force the reference decomposition. 2: force the fused
+    # F.group_norm kernel.
+    "VLLM_ASCEND_RWKV7_GNORM_MANUAL": lambda: int(os.getenv("VLLM_ASCEND_RWKV7_GNORM_MANUAL", "0")),
     # RWKV7 fused CMIX projection. Defaults to the reference path; set to 1
     # when validating the fused NPU kernel for this operator.
     "RWKV7_USE_FUSED_CMIX": lambda: bool(int(os.getenv("RWKV7_USE_FUSED_CMIX", "0"))),

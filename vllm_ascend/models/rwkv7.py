@@ -57,6 +57,7 @@ from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from vllm_ascend import envs
+from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.ops.triton.fla import fused_recurrent_rwkv7
 
 # Snapshot the RWKV7 configuration once per process so the dispatch hot paths
@@ -611,14 +612,35 @@ class RWKV7GroupNorm(nn.Module):
         self.value_start = self.tp_rank * self.local_value_dim
         self.value_end = self.value_start + self.local_value_dim
         self.eps = self.head_dim * eps
+        self._use_reference_gnorm = self._resolve_reference_gnorm()
 
         self.weight = nn.Parameter(torch.ones(self.value_dim))
         self.bias = nn.Parameter(torch.zeros(self.value_dim))
+
+    @staticmethod
+    def _resolve_reference_gnorm() -> bool:
+        mode = envs.VLLM_ASCEND_RWKV7_GNORM_MANUAL
+        if mode == 1:
+            return True
+        if mode == 2:
+            return False
+        # On 310P the fused group_norm kernel leaves most of the output
+        # buffer unwritten (stale memory), so the reference decomposition
+        # is the correct default there; other hardware keeps the fused op.
+        return is_310p()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         weight = self.weight[self.value_start : self.value_end]
         bias = self.bias[self.value_start : self.value_end]
         x = x.to(torch.float32)
+        if self._use_reference_gnorm:
+            xg = x.view(x.shape[0], self.local_num_heads, self.head_dim)
+            mean = xg.mean(dim=2, keepdim=True)
+            var = xg.var(dim=2, keepdim=True, unbiased=False)
+            xg = (xg - mean) / torch.sqrt(var + self.eps)
+            xg = xg * weight.to(torch.float32).view(1, self.local_num_heads, self.head_dim)
+            xg = xg + bias.to(torch.float32).view(1, self.local_num_heads, self.head_dim)
+            return xg.view(x.shape[0], -1)
         x = F.group_norm(
             x.unsqueeze(-1),
             num_groups=self.local_num_heads,
